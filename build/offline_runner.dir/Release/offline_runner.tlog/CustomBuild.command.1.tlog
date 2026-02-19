@@ -1,0 +1,10 @@
+^C:\DEADPIXELQC_OFX\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/DeadPixelQC_OFX -BC:/DeadPixelQC_OFX/build --check-stamp-file C:/DeadPixelQC_OFX/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
