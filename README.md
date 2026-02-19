@@ -204,6 +204,12 @@ See `CONTRIBUTING.md` for detailed guidelines.
 
 For issues and feature requests, please use the GitHub issue tracker.
 
+## Resolve Cache Note
+
+If Resolve reports `failed to load` after updating the plugin binary, clear `OFXPluginCache.xml` and relaunch Resolve.
+
+Detailed steps and paths: `docs/resolve_debug.md`.
+
 ---
 
 *DeadPixelQC - Professional stuck pixel detection for video quality control*

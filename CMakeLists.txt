@@ -5,10 +5,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # Configuration options
 option(BUILD_PLUGIN "Build OFX plugin" ON)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_TOOLS "Build tools" ON)
+option(DPQC_MINIMAL_UI "Build minimal UI-only plugin" ON)
+option(DPQC_ENABLE_SPATIAL "Enable spatial worker path" OFF)
+option(DPQC_ENABLE_TEMPORAL "Enable temporal worker path" OFF)
+option(DPQC_ENABLE_FIX "Enable fix worker path" OFF)
 
 # Set output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -32,19 +40,35 @@ target_include_directories(DeadPixelQC_core INTERFACE
 
 # Plugin
 if(BUILD_PLUGIN)
-    add_library(DeadPixelQC_OFX MODULE
+    set(DEADPIXELQC_PLUGIN_SOURCES
         plugin/PluginMain.cpp
-        plugin/PluginParams.cpp
-        plugin/PluginParamsConstants.cpp
-        plugin/PluginParamsBasic.cpp
-        plugin/PluginParamsDetection.cpp
-        plugin/PluginParamsTemporal.cpp
-        plugin/PluginParamsRepair.cpp
-        plugin/PluginParamsGetters.cpp
-        plugin/OfxUtil.cpp
+        plugin/Workers/SpatialWorker.cpp
+        plugin/Workers/TemporalWorker.cpp
+        plugin/Workers/FixWorker.cpp
     )
+
+    if(NOT DPQC_MINIMAL_UI)
+        list(APPEND DEADPIXELQC_PLUGIN_SOURCES
+            plugin/PluginParams.cpp
+            plugin/PluginParamsConstants.cpp
+            plugin/PluginParamsBasic.cpp
+            plugin/PluginParamsDetection.cpp
+            plugin/PluginParamsTemporal.cpp
+            plugin/PluginParamsRepair.cpp
+            plugin/PluginParamsGetters.cpp
+            plugin/OfxUtil.cpp
+        )
+    endif()
+
+    add_library(DeadPixelQC_OFX MODULE ${DEADPIXELQC_PLUGIN_SOURCES})
     
     target_link_libraries(DeadPixelQC_OFX DeadPixelQC_core)
+    target_compile_definitions(DeadPixelQC_OFX PRIVATE
+        DPQC_MINIMAL_UI=$<IF:$<BOOL:${DPQC_MINIMAL_UI}>,1,0>
+        DPQC_ENABLE_SPATIAL=$<IF:$<BOOL:${DPQC_ENABLE_SPATIAL}>,1,0>
+        DPQC_ENABLE_TEMPORAL=$<IF:$<BOOL:${DPQC_ENABLE_TEMPORAL}>,1,0>
+        DPQC_ENABLE_FIX=$<IF:$<BOOL:${DPQC_ENABLE_FIX}>,1,0>
+    )
     
     # Set plugin properties
     if(WIN32)

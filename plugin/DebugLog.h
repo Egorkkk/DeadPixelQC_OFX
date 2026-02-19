@@ -4,6 +4,11 @@
 #include <string>
 #include <fstream>
 #include <mutex>
+#include <cstdlib>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace DeadPixelQC_OFX {
 
@@ -17,11 +22,15 @@ public:
     void log(const std::string& message) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!file_.is_open()) {
-            file_.open("C:\\DeadPixelQC_OFX\\plugin_debug.log", std::ios::app);
+            openIfNeededNoThrow();
         }
         if (file_.is_open()) {
-            file_ << message << std::endl;
-            file_.flush();
+            try {
+                file_ << message << std::endl;
+                file_.flush();
+            } catch (...) {
+                // Silent fail: logging must never crash plugin loading/rendering.
+            }
         }
     }
     
@@ -51,6 +60,33 @@ private:
     
     std::ofstream file_;
     std::mutex mutex_;
+
+    static std::string getLogPath() {
+#if defined(_WIN32)
+        char tempPath[MAX_PATH] = {0};
+        const DWORD len = GetTempPathA(MAX_PATH, tempPath);
+        if (len > 0 && len < MAX_PATH) {
+            std::string path(tempPath);
+            if (!path.empty() && path.back() != '\\' && path.back() != '/') {
+                path += "\\";
+            }
+            path += "deadpixelqc_debug.log";
+            return path;
+        }
+#endif
+        return "C:\\temp\\deadpixelqc_debug.log";
+    }
+
+    void openIfNeededNoThrow() {
+        if (file_.is_open()) {
+            return;
+        }
+        try {
+            file_.open(getLogPath(), std::ios::app);
+        } catch (...) {
+            // Silent fail: logging is optional.
+        }
+    }
 };
 
 // Макросы для удобства

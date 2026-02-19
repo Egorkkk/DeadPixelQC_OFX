@@ -7,23 +7,35 @@
 #include "ofxMultiThread.h"
 #include "ofxMessage.h"
 #include "ofxParam.h"
+#include "Workers/SpatialWorker.h"
 
-#include "PluginParams.h"
-#include "OfxUtil.h"
-#include "DebugLog.h"
-
-#include "../core/SpatialDetector.h"
-#include "../core/TemporalTracker.h"
-#include "../core/Fixer.h"
-#include "../core/PixelFormatAdapter.h"
-
-#include <memory>
-#include <mutex>
-#include <vector>
-#include <string>
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <new>
+#include <string>
 
-using namespace DeadPixelQC;
+#ifndef DPQC_MINIMAL_UI
+#define DPQC_MINIMAL_UI 1
+#endif
+
+#ifndef DPQC_ENABLE_SPATIAL
+#define DPQC_ENABLE_SPATIAL 0
+#endif
+
+#ifndef DPQC_ENABLE_TEMPORAL
+#define DPQC_ENABLE_TEMPORAL 0
+#endif
+
+#ifndef DPQC_ENABLE_FIX
+#define DPQC_ENABLE_FIX 0
+#endif
+
+#define DPQC_LOG(msg) do { } while (0)
+#define DPQC_LOG_ACTION(action, handle) do { } while (0)
+#define DPQC_LOG_ERROR(msg) do { } while (0)
+#define DPQC_LOG_WARNING(msg) do { } while (0)
 
 // Global OFX host pointer
 static const OfxHost* gHost = nullptr;
@@ -36,136 +48,391 @@ static const OfxMemorySuiteV1* gMemorySuite = nullptr;
 static const OfxMultiThreadSuiteV1* gMultiThreadSuite = nullptr;
 static const OfxMessageSuiteV1* gMessageSuite = nullptr;
 
-// Plugin instance data
+namespace {
+namespace OFXW = DeadPixelQC_OFX::Workers;
+
+constexpr const char* kParamEnable = "Enable";
+constexpr const char* kParamThreshold = "Threshold";
+constexpr const char* kParamMode = "Mode";
+
 struct PluginInstanceData {
-    // Core processing objects
-    std::unique_ptr<DeadPixelQC::SpatialDetector> spatialDetector;
-    std::unique_ptr<DeadPixelQC::TemporalTracker> temporalTracker;
-    std::unique_ptr<DeadPixelQC::Fixer> fixer;
-    
-    // Clip handles
     OfxImageClipHandle sourceClip = nullptr;
     OfxImageClipHandle outputClip = nullptr;
-    
-    // Current frame index (for temporal tracking)
-    i32 currentFrameIndex = -1;
-    
-    // Mutex for thread safety
     std::mutex mutex;
-    
-    // Reset temporal state (e.g., when scrubbing)
-    void resetTemporalState() {
-        if (temporalTracker) {
-            temporalTracker->resetTemporalState();
-        }
-        currentFrameIndex = -1;
-    }
 };
 
-// Get instance data from effect handle
+struct ImageDesc {
+    void* data = nullptr;
+    int rowBytes = 0;
+    OfxRectI bounds = {0, 0, 0, 0};
+    const char* components = nullptr;
+    const char* bitDepth = nullptr;
+};
+
+static OFXW::FramePixelFormat toWorkerFormat(const char* components, const char* bitDepth) {
+    if (!components || !bitDepth) {
+        return OFXW::FramePixelFormat::Unknown;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthByte) == 0) {
+        return OFXW::FramePixelFormat::RGB8;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthByte) == 0) {
+        return OFXW::FramePixelFormat::RGBA8;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthShort) == 0) {
+        return OFXW::FramePixelFormat::RGB16;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthShort) == 0) {
+        return OFXW::FramePixelFormat::RGBA16;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthFloat) == 0) {
+        return OFXW::FramePixelFormat::RGB32F;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthFloat) == 0) {
+        return OFXW::FramePixelFormat::RGBA32F;
+    }
+    return OFXW::FramePixelFormat::Unknown;
+}
+
+static int componentsToCount(const char* components) {
+    if (!components) {
+        return 0;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0) {
+        return 4;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0) {
+        return 3;
+    }
+    if (std::strcmp(components, kOfxImageComponentAlpha) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int bitDepthToBytes(const char* bitDepth) {
+    if (!bitDepth) {
+        return 0;
+    }
+    if (std::strcmp(bitDepth, kOfxBitDepthByte) == 0) {
+        return 1;
+    }
+    if (std::strcmp(bitDepth, kOfxBitDepthShort) == 0 || std::strcmp(bitDepth, kOfxBitDepthHalf) == 0) {
+        return 2;
+    }
+    if (std::strcmp(bitDepth, kOfxBitDepthFloat) == 0) {
+        return 4;
+    }
+    return 0;
+}
+
 static PluginInstanceData* getInstanceData(OfxImageEffectHandle effect) {
     OfxPropertySetHandle effectProps = nullptr;
-    gEffectSuite->getPropertySet(effect, &effectProps);
-    
+    if (!gEffectSuite || !gPropertySuite) {
+        return nullptr;
+    }
+    if (gEffectSuite->getPropertySet(effect, &effectProps) != kOfxStatOK || !effectProps) {
+        return nullptr;
+    }
+
     PluginInstanceData* instanceData = nullptr;
-    gPropertySuite->propGetPointer(effectProps, kOfxPropInstanceData, 0, 
-                                   reinterpret_cast<void**>(&instanceData));
+    if (gPropertySuite->propGetPointer(effectProps, kOfxPropInstanceData, 0,
+                                       reinterpret_cast<void**>(&instanceData)) != kOfxStatOK) {
+        return nullptr;
+    }
     return instanceData;
 }
 
-// Set instance data to effect handle
 static void setInstanceData(OfxImageEffectHandle effect, PluginInstanceData* instanceData) {
     OfxPropertySetHandle effectProps = nullptr;
-    gEffectSuite->getPropertySet(effect, &effectProps);
-    
+    if (!gEffectSuite || !gPropertySuite) {
+        return;
+    }
+    if (gEffectSuite->getPropertySet(effect, &effectProps) != kOfxStatOK || !effectProps) {
+        return;
+    }
     gPropertySuite->propSetPointer(effectProps, kOfxPropInstanceData, 0, instanceData);
 }
 
-// Fetch host suites using the host's fetchSuite function
+static bool fetchImageDesc(OfxPropertySetHandle imageHandle, ImageDesc& out) {
+    if (!imageHandle || !gPropertySuite) {
+        return false;
+    }
+
+    char* components = nullptr;
+    char* bitDepth = nullptr;
+
+    if (gPropertySuite->propGetPointer(imageHandle, kOfxImagePropData, 0, &out.data) != kOfxStatOK || !out.data) {
+        return false;
+    }
+    if (gPropertySuite->propGetInt(imageHandle, kOfxImagePropRowBytes, 0, &out.rowBytes) != kOfxStatOK || out.rowBytes == 0) {
+        return false;
+    }
+    if (gPropertySuite->propGetIntN(imageHandle, kOfxImagePropBounds, 4, &out.bounds.x1) != kOfxStatOK) {
+        return false;
+    }
+    if (gPropertySuite->propGetString(imageHandle, kOfxImageEffectPropComponents, 0, &components) != kOfxStatOK) {
+        return false;
+    }
+    if (gPropertySuite->propGetString(imageHandle, kOfxImageEffectPropPixelDepth, 0, &bitDepth) != kOfxStatOK) {
+        return false;
+    }
+
+    out.components = components;
+    out.bitDepth = bitDepth;
+    return true;
+}
+
+static void copyImageRows(const ImageDesc& src, const ImageDesc& dst) {
+    const int srcWidth = src.bounds.x2 - src.bounds.x1;
+    const int srcHeight = src.bounds.y2 - src.bounds.y1;
+    const int dstWidth = dst.bounds.x2 - dst.bounds.x1;
+    const int dstHeight = dst.bounds.y2 - dst.bounds.y1;
+
+    const int width = std::min(srcWidth, dstWidth);
+    const int height = std::min(srcHeight, dstHeight);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const int componentCount = componentsToCount(src.components);
+    const int bytesPerComponent = bitDepthToBytes(src.bitDepth);
+    if (componentCount <= 0 || bytesPerComponent <= 0) {
+        return;
+    }
+
+    const int bytesPerPixel = componentCount * bytesPerComponent;
+    const int srcStride = (src.rowBytes < 0) ? -src.rowBytes : src.rowBytes;
+    const int dstStride = (dst.rowBytes < 0) ? -dst.rowBytes : dst.rowBytes;
+    if (srcStride <= 0 || dstStride <= 0) {
+        return;
+    }
+
+    const int requestedBytes = width * bytesPerPixel;
+    const int bytesToCopy = std::min(requestedBytes, std::min(srcStride, dstStride));
+    if (bytesToCopy <= 0) {
+        return;
+    }
+
+    const auto* srcBase = static_cast<const std::uint8_t*>(src.data);
+    auto* dstBase = static_cast<std::uint8_t*>(dst.data);
+
+    if (src.rowBytes < 0) {
+        srcBase += static_cast<std::ptrdiff_t>(srcStride) * (height - 1);
+    }
+    if (dst.rowBytes < 0) {
+        dstBase += static_cast<std::ptrdiff_t>(dstStride) * (height - 1);
+    }
+
+    for (int y = 0; y < height; ++y) {
+        const std::uint8_t* srcRow = (src.rowBytes < 0) ? (srcBase - static_cast<std::ptrdiff_t>(srcStride) * y)
+                                                        : (srcBase + static_cast<std::ptrdiff_t>(srcStride) * y);
+        std::uint8_t* dstRow = (dst.rowBytes < 0) ? (dstBase - static_cast<std::ptrdiff_t>(dstStride) * y)
+                                                  : (dstBase + static_cast<std::ptrdiff_t>(dstStride) * y);
+        std::memcpy(dstRow, srcRow, static_cast<size_t>(bytesToCopy));
+    }
+}
+
 static OfxStatus fetchHostSuites() {
-    DEBUG_LOG("Fetching host suites");
-    
+    DPQC_LOG("Fetching host suites");
+
     if (!gHost || !gHost->fetchSuite) {
-        DEBUG_LOG_ERROR("Host or fetchSuite is null");
+        DPQC_LOG_ERROR("Host or fetchSuite is null");
         return kOfxStatErrMissingHostFeature;
     }
-    
-    // Fetch suites using the host's fetchSuite function
+
     gEffectSuite = reinterpret_cast<const OfxImageEffectSuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxImageEffectSuite, 1));
-    
+
     gPropertySuite = reinterpret_cast<const OfxPropertySuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxPropertySuite, 1));
-    
+
     gParamSuite = reinterpret_cast<const OfxParameterSuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxParameterSuite, 1));
-    
+
+    // Optional suites: absence must not fail plugin load.
     gMemorySuite = reinterpret_cast<const OfxMemorySuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxMemorySuite, 1));
-    
+
     gMultiThreadSuite = reinterpret_cast<const OfxMultiThreadSuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxMultiThreadSuite, 1));
-    
+
     gMessageSuite = reinterpret_cast<const OfxMessageSuiteV1*>(
         gHost->fetchSuite(gHost->host, kOfxMessageSuite, 1));
-    
-    if (!gEffectSuite || !gPropertySuite || !gParamSuite || !gMemorySuite || 
-        !gMultiThreadSuite || !gMessageSuite) {
-        DEBUG_LOG_ERROR("Failed to fetch one or more suites");
+
+    if (!gEffectSuite || !gPropertySuite || !gParamSuite) {
+        DPQC_LOG_ERROR("Failed to fetch mandatory suites (ImageEffect/Property/Parameter)");
         return kOfxStatErrMissingHostFeature;
     }
-    
-    DEBUG_LOG("All suites fetched successfully");
+
+    if (!gMemorySuite) {
+        DPQC_LOG_WARNING("Optional suite missing: OfxMemorySuite");
+    }
+    if (!gMultiThreadSuite) {
+        DPQC_LOG_WARNING("Optional suite missing: OfxMultiThreadSuite");
+    }
+    if (!gMessageSuite) {
+        DPQC_LOG_WARNING("Optional suite missing: OfxMessageSuite");
+    }
+
     return kOfxStatOK;
 }
 
-// Called when plugin is loaded
 static OfxStatus onLoad() {
-    DEBUG_LOG_ACTION(kOfxActionLoad, "");
+    DPQC_LOG_ACTION(kOfxActionLoad, "");
     return fetchHostSuites();
 }
 
-// Called before plugin is unloaded
 static OfxStatus onUnload() {
-    DEBUG_LOG_ACTION(kOfxActionUnload, "");
+    DPQC_LOG_ACTION(kOfxActionUnload, "");
+
+    gEffectSuite = nullptr;
+    gPropertySuite = nullptr;
+    gParamSuite = nullptr;
+    gMemorySuite = nullptr;
+    gMultiThreadSuite = nullptr;
+    gMessageSuite = nullptr;
+
     return kOfxStatOK;
 }
 
-// Create plugin instance
-static OfxStatus createInstance(OfxImageEffectHandle effect) {
-    DEBUG_LOG_ACTION(kOfxActionCreateInstance, "Creating instance");
-    
-    try {
-        // Create instance data
-        auto instanceData = std::make_unique<PluginInstanceData>();
-        
-        // Get clip handles
-        gEffectSuite->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName, 
-                                    &instanceData->sourceClip, nullptr);
-        gEffectSuite->clipGetHandle(effect, kOfxImageEffectOutputClipName, 
-                                    &instanceData->outputClip, nullptr);
-        
-        // Create core objects (will be configured with parameters later)
-        instanceData->spatialDetector = std::make_unique<DeadPixelQC::SpatialDetector>();
-        instanceData->temporalTracker = std::make_unique<DeadPixelQC::TemporalTracker>();
-        instanceData->fixer = std::make_unique<DeadPixelQC::Fixer>();
-        
-        // Store instance data
-        setInstanceData(effect, instanceData.release());
-        
-        DEBUG_LOG("Instance created successfully");
-        return kOfxStatOK;
-    } catch (const std::exception& e) {
-        DEBUG_LOG_ERROR(std::string("Failed to create instance: ") + e.what());
-        DeadPixelQC_OFX::OfxUtil::reportError(effect, std::string("Failed to create instance: ") + e.what());
-        return kOfxStatErrMemory;
+static bool getParamBoolAtTime(OfxParamSetHandle paramSet, const char* name, double time, bool fallback) {
+    if (!paramSet || !gParamSuite) {
+        return fallback;
     }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return fallback;
+    }
+    int value = fallback ? 1 : 0;
+    if (gParamSuite->paramGetValueAtTime(handle, time, &value) != kOfxStatOK) {
+        return fallback;
+    }
+    return value != 0;
 }
 
-// Destroy plugin instance
+static double getParamDoubleAtTime(OfxParamSetHandle paramSet, const char* name, double time, double fallback) {
+    if (!paramSet || !gParamSuite) {
+        return fallback;
+    }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return fallback;
+    }
+    double value = fallback;
+    if (gParamSuite->paramGetValueAtTime(handle, time, &value) != kOfxStatOK) {
+        return fallback;
+    }
+    return value;
+}
+
+static int getParamIntAtTime(OfxParamSetHandle paramSet, const char* name, double time, int fallback) {
+    if (!paramSet || !gParamSuite) {
+        return fallback;
+    }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return fallback;
+    }
+    int value = fallback;
+    if (gParamSuite->paramGetValueAtTime(handle, time, &value) != kOfxStatOK) {
+        return fallback;
+    }
+    return value;
+}
+
+static void defineMinimalParameters(OfxParamSetHandle paramSet) {
+    OfxPropertySetHandle paramProps = nullptr;
+
+    gParamSuite->paramDefine(paramSet, kOfxParamTypeBoolean, kParamEnable, &paramProps);
+    gPropertySuite->propSetInt(paramProps, kOfxParamPropDefault, 0, 1);
+    gPropertySuite->propSetString(paramProps, kOfxPropLabel, 0, "Enable");
+
+    gParamSuite->paramDefine(paramSet, kOfxParamTypeDouble, kParamThreshold, &paramProps);
+    gPropertySuite->propSetDouble(paramProps, kOfxParamPropDefault, 0, 0.98);
+    gPropertySuite->propSetDouble(paramProps, kOfxParamPropMin, 0, 0.0);
+    gPropertySuite->propSetDouble(paramProps, kOfxParamPropMax, 0, 1.0);
+    gPropertySuite->propSetString(paramProps, kOfxPropLabel, 0, "Threshold");
+
+    gParamSuite->paramDefine(paramSet, kOfxParamTypeChoice, kParamMode, &paramProps);
+    gPropertySuite->propSetString(paramProps, kOfxParamPropChoiceOption, 0, "PassThrough");
+    gPropertySuite->propSetString(paramProps, kOfxParamPropChoiceOption, 1, "CandidatesOverlay");
+    gPropertySuite->propSetString(paramProps, kOfxParamPropChoiceOption, 2, "MaskOnly");
+    gPropertySuite->propSetInt(paramProps, kOfxParamPropDefault, 0, 0);
+    gPropertySuite->propSetString(paramProps, kOfxPropLabel, 0, "Mode");
+}
+
+static OfxStatus describe(OfxImageEffectHandle effect) {
+    DPQC_LOG_ACTION(kOfxActionDescribe, "Describing plugin");
+
+    OfxPropertySetHandle effectProps = nullptr;
+    if (gEffectSuite->getPropertySet(effect, &effectProps) != kOfxStatOK || !effectProps) {
+        return kOfxStatFailed;
+    }
+
+    gPropertySuite->propSetString(effectProps, kOfxPropLabel, 0, "DeadPixelQC");
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "Quality Control");
+
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
+
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthByte);
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 1, kOfxBitDepthShort);
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 2, kOfxBitDepthFloat);
+
+    gPropertySuite->propSetInt(effectProps, kOfxImageEffectPluginPropHostFrameThreading, 0, 1);
+    gPropertySuite->propSetString(effectProps, kOfxImageEffectPluginRenderThreadSafety, 0, kOfxImageEffectRenderInstanceSafe);
+
+    return kOfxStatOK;
+}
+
+static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHandle /*inArgs*/) {
+    DPQC_LOG_ACTION(kOfxImageEffectActionDescribeInContext, "Describing in context");
+
+    OfxPropertySetHandle clipProps = nullptr;
+
+    if (gEffectSuite->clipDefine(effect, kOfxImageEffectOutputClipName, &clipProps) == kOfxStatOK && clipProps) {
+        gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+        gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 1, kOfxImageComponentRGB);
+    }
+
+    if (gEffectSuite->clipDefine(effect, kOfxImageEffectSimpleSourceClipName, &clipProps) == kOfxStatOK && clipProps) {
+        gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+        gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 1, kOfxImageComponentRGB);
+    }
+
+    OfxParamSetHandle paramSet = nullptr;
+    if (gEffectSuite->getParamSet(effect, &paramSet) == kOfxStatOK && paramSet) {
+        defineMinimalParameters(paramSet);
+    }
+
+    return kOfxStatOK;
+}
+
+static OfxStatus createInstance(OfxImageEffectHandle effect) {
+    DPQC_LOG_ACTION(kOfxActionCreateInstance, "Creating instance");
+
+    auto* instanceData = new (std::nothrow) PluginInstanceData();
+    if (!instanceData) {
+        return kOfxStatErrMemory;
+    }
+
+    if (gEffectSuite->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName, &instanceData->sourceClip, nullptr) != kOfxStatOK) {
+        delete instanceData;
+        return kOfxStatErrBadHandle;
+    }
+
+    if (gEffectSuite->clipGetHandle(effect, kOfxImageEffectOutputClipName, &instanceData->outputClip, nullptr) != kOfxStatOK) {
+        delete instanceData;
+        return kOfxStatErrBadHandle;
+    }
+
+    setInstanceData(effect, instanceData);
+    return kOfxStatOK;
+}
+
 static OfxStatus destroyInstance(OfxImageEffectHandle effect) {
-    DEBUG_LOG_ACTION(kOfxActionDestroyInstance, "Destroying instance");
-    
+    DPQC_LOG_ACTION(kOfxActionDestroyInstance, "Destroying instance");
+
     PluginInstanceData* instanceData = getInstanceData(effect);
     if (instanceData) {
         delete instanceData;
@@ -174,351 +441,186 @@ static OfxStatus destroyInstance(OfxImageEffectHandle effect) {
     return kOfxStatOK;
 }
 
-// Describe plugin capabilities
-static OfxStatus describe(OfxImageEffectHandle effect) {
-    DEBUG_LOG_ACTION(kOfxActionDescribe, "Describing plugin");
-    
-    OfxPropertySetHandle effectProps = nullptr;
-    gEffectSuite->getPropertySet(effect, &effectProps);
-    
-    // Set plugin properties
-    gPropertySuite->propSetString(effectProps, kOfxPropLabel, 0, "DeadPixelQC");
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "Quality Control");
-    
-    // Support multiple contexts (filter and general)
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0, 
-                                  kOfxImageEffectContextFilter);
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 1, 
-                                  kOfxImageEffectContextGeneral);
-    
-    // Support multiple pixel depths
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, 
-                                  kOfxBitDepthByte);
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 1, 
-                                  kOfxBitDepthShort);
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 2, 
-                                  kOfxBitDepthFloat);
-    
-    // Support RGBA and RGB components
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedComponents, 0, 
-                                  kOfxImageComponentRGBA);
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPropSupportedComponents, 1, 
-                                  kOfxImageComponentRGB);
-    
-    // Enable host frame threading
-    gPropertySuite->propSetInt(effectProps, kOfxImageEffectPluginPropHostFrameThreading, 0, 1);
-    
-    // Render thread safety
-    gPropertySuite->propSetString(effectProps, kOfxImageEffectPluginRenderThreadSafety, 0, 
-                                  kOfxImageEffectRenderInstanceSafe);
-    
-    DEBUG_LOG("Plugin description completed");
-    return kOfxStatOK;
-}
-
-// Describe plugin in specific context
-static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHandle inArgs) {
-    DEBUG_LOG_ACTION(kOfxImageEffectActionDescribeInContext, "Describing in context");
-    
-    // Get context
-    char* context = nullptr;
-    gPropertySuite->propGetString(inArgs, kOfxImageEffectPropContext, 0, &context);
-    
-    // Define clips
-    OfxPropertySetHandle clipProps = nullptr;
-    
-    // Output clip
-    gEffectSuite->clipDefine(effect, kOfxImageEffectOutputClipName, &clipProps);
-    gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, 
-                                  kOfxImageComponentRGBA);
-    gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 1, 
-                                  kOfxImageComponentRGB);
-    
-    // Source clip
-    gEffectSuite->clipDefine(effect, kOfxImageEffectSimpleSourceClipName, &clipProps);
-    gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 0, 
-                                  kOfxImageComponentRGBA);
-    gPropertySuite->propSetString(clipProps, kOfxImageEffectPropSupportedComponents, 1, 
-                                  kOfxImageComponentRGB);
-    
-    // Get parameter set
-    OfxParamSetHandle paramSet = nullptr;
-    gEffectSuite->getParamSet(effect, &paramSet);
-    
-    // Define parameters
-    DeadPixelQC_OFX::defineParameters(paramSet);
-    
-    DEBUG_LOG("Context description completed");
-    return kOfxStatOK;
-}
-
-// Get clip preferences
-static OfxStatus getClipPreferences(OfxImageEffectHandle effect, 
-                                    OfxPropertySetHandle /*inArgs*/, 
+static OfxStatus getClipPreferences(OfxImageEffectHandle /*effect*/,
+                                    OfxPropertySetHandle /*inArgs*/,
                                     OfxPropertySetHandle outArgs) {
-    DEBUG_LOG_ACTION(kOfxImageEffectActionGetClipPreferences, "Getting clip preferences");
-    
-    // Set output to match input format
-    gPropertySuite->propSetString(outArgs, "OfxImageClipPropComponents_Output", 0, 
-                                  kOfxImageComponentRGBA);
-    
-    return kOfxStatOK;
-}
+    DPQC_LOG_ACTION(kOfxImageEffectActionGetClipPreferences, "Getting clip preferences");
 
-// Instance changed callback
-static OfxStatus instanceChanged(OfxImageEffectHandle effect,
-                                 OfxPropertySetHandle inArgs,
-                                 OfxPropertySetHandle /*outArgs*/) {
-    DEBUG_LOG_ACTION(kOfxActionInstanceChanged, "Instance changed");
-    
-    // Check if temporal state needs to be reset
-    char* changeReason = nullptr;
-    gPropertySuite->propGetString(inArgs, kOfxPropChangeReason, 0, &changeReason);
-    
-    if (changeReason && strcmp(changeReason, kOfxChangeTime) == 0) {
-        // Time changed - check if we're scrubbing
-        PluginInstanceData* instanceData = getInstanceData(effect);
-        if (instanceData) {
-            // In a real implementation, we'd check if the time jump is large
-            // For now, we'll reset on any time change for safety
-            instanceData->resetTemporalState();
-        }
+    if (outArgs) {
+        gPropertySuite->propSetString(outArgs, "OfxImageClipPropComponents_Output", 0, kOfxImageComponentRGBA);
     }
-    
     return kOfxStatOK;
 }
 
-// Begin sequence render
-static OfxStatus beginSequenceRender(OfxImageEffectHandle effect,
-                                     OfxPropertySetHandle inArgs,
-                                     OfxPropertySetHandle /*outArgs*/) {
-    DEBUG_LOG_ACTION(kOfxImageEffectActionBeginSequenceRender, "Begin sequence render");
-    
+static OfxStatus render(OfxImageEffectHandle effect,
+                        OfxPropertySetHandle inArgs,
+                        OfxPropertySetHandle /*outArgs*/) {
+    DPQC_LOG_ACTION(kOfxImageEffectActionRender, "Rendering frame");
+
     PluginInstanceData* instanceData = getInstanceData(effect);
     if (!instanceData) {
         return kOfxStatErrBadHandle;
     }
-    
-    // Reset temporal state at start of sequence
-    instanceData->resetTemporalState();
-    
-    return kOfxStatOK;
-}
 
-// End sequence render
-static OfxStatus endSequenceRender(OfxImageEffectHandle effect,
-                                   OfxPropertySetHandle /*inArgs*/,
-                                   OfxPropertySetHandle /*outArgs*/) {
-    DEBUG_LOG_ACTION(kOfxImageEffectActionEndSequenceRender, "End sequence render");
-    return kOfxStatOK;
-}
-
-// Render a frame
-static OfxStatus render(OfxImageEffectHandle effect,
-                        OfxPropertySetHandle inArgs,
-                        OfxPropertySetHandle /*outArgs*/) {
-    DEBUG_LOG_ACTION(kOfxImageEffectActionRender, "Rendering frame");
-    
-    PluginInstanceData* instanceData = getInstanceData(effect);
-    if (!instanceData || !instanceData->spatialDetector || 
-        !instanceData->temporalTracker || !instanceData->fixer) {
-        return kOfxStatErrBadHandle;
-    }
-    
-    // Get render time
     double time = 0.0;
-    gPropertySuite->propGetDouble(inArgs, kOfxPropTime, 0, &time);
-    
-    // Get parameter set
-    OfxParamSetHandle paramSet = nullptr;
-    gEffectSuite->getParamSet(effect, &paramSet);
-    
-    // Check if effect is enabled
-    if (!DeadPixelQC_OFX::isEnabled(paramSet, time)) {
-        // Effect disabled - pass through source
-        OfxPropertySetHandle sourceImg = nullptr;
-        OfxPropertySetHandle outputImg = nullptr;
-        
-        // Get source image
-        gEffectSuite->clipGetImage(instanceData->sourceClip, time, nullptr, &sourceImg);
-        if (!sourceImg) {
-            return kOfxStatFailed;
-        }
-        
-        // Get output image
-        gEffectSuite->clipGetImage(instanceData->outputClip, time, nullptr, &outputImg);
-        if (!outputImg) {
-            gEffectSuite->clipReleaseImage(sourceImg);
-            return kOfxStatFailed;
-        }
-        
-        // Copy source to output (simple pass-through)
-        // In a real implementation, we'd copy pixel data
-        // For now, we'll just release the images
-        
-        gEffectSuite->clipReleaseImage(sourceImg);
-        gEffectSuite->clipReleaseImage(outputImg);
-        return kOfxStatOK;
+    if (inArgs) {
+        gPropertySuite->propGetDouble(inArgs, kOfxPropTime, 0, &time);
     }
-    
-    // Get parameters
-    auto spatialParams = DeadPixelQC_OFX::getSpatialParams(paramSet, time);
-    auto temporalParams = DeadPixelQC_OFX::getTemporalParams(paramSet, time);
-    auto repairParams = DeadPixelQC_OFX::getRepairParams(paramSet, time);
-    int viewMode = DeadPixelQC_OFX::getViewMode(paramSet, time);
-    
-    // Update core objects with parameters
-    instanceData->spatialDetector->setParams(spatialParams);
-    instanceData->temporalTracker->setParams(temporalParams);
-    instanceData->fixer->setParams(repairParams);
-    
-    // Get source and output images
+
     OfxPropertySetHandle sourceImg = nullptr;
     OfxPropertySetHandle outputImg = nullptr;
-    
-    OfxStatus status = gEffectSuite->clipGetImage(instanceData->sourceClip, time, nullptr, &sourceImg);
-    if (status != kOfxStatOK || !sourceImg) {
-        return kOfxStatFailed;
+
+    if (gEffectSuite->clipGetImage(instanceData->sourceClip, time, nullptr, &sourceImg) != kOfxStatOK || !sourceImg) {
+        return kOfxStatOK;
     }
-    
-    status = gEffectSuite->clipGetImage(instanceData->outputClip, time, nullptr, &outputImg);
-    if (status != kOfxStatOK || !outputImg) {
+
+    if (gEffectSuite->clipGetImage(instanceData->outputClip, time, nullptr, &outputImg) != kOfxStatOK || !outputImg) {
         gEffectSuite->clipReleaseImage(sourceImg);
-        return kOfxStatFailed;
+        return kOfxStatOK;
     }
-    
+
+    OfxStatus status = kOfxStatOK;
     try {
-        // Convert OFX images to our buffer format
-        auto sourceBuffer = DeadPixelQC_OFX::OfxUtil::getImageBuffer(sourceImg);
-        auto outputBuffer = DeadPixelQC_OFX::OfxUtil::getImageBuffer(outputImg);
-        
-        // Process frame
-        auto spatialResult = instanceData->spatialDetector->processFrame(sourceBuffer, 
-                                                                         static_cast<i32>(time));
-        
-        // Apply temporal tracking
-        auto temporalResult = instanceData->temporalTracker->processFrame(spatialResult);
-        
-        // Copy source to output
-        // In a real implementation, we'd copy pixel data based on view mode
-        // For now, we'll implement a simple copy
-        
-        // TODO: Implement proper rendering based on view mode:
-        // - Output: pass-through or repaired
-        // - Overlay modes: blend markers
-        // - Mask-only: output mask
-        
-        // Simple copy for now
-        const i32 width = sourceBuffer.width();
-        const i32 height = sourceBuffer.height();
-        
-        for (i32 y = 0; y < height; ++y) {
-            for (i32 x = 0; x < width; ++x) {
-                f32 r, g, b;
-                sourceBuffer.getRGBNormalized(x, y, r, g, b);
-                outputBuffer.setPixelNormalized(x, y, r, g, b);
+        ImageDesc srcDesc;
+        ImageDesc dstDesc;
+
+        if (fetchImageDesc(sourceImg, srcDesc) && fetchImageDesc(outputImg, dstDesc)) {
+            const bool sameDepth = srcDesc.bitDepth && dstDesc.bitDepth && std::strcmp(srcDesc.bitDepth, dstDesc.bitDepth) == 0;
+            const bool sameComponents = srcDesc.components && dstDesc.components && std::strcmp(srcDesc.components, dstDesc.components) == 0;
+            if (sameDepth && sameComponents) {
+                const int srcWidth = srcDesc.bounds.x2 - srcDesc.bounds.x1;
+                const int srcHeight = srcDesc.bounds.y2 - srcDesc.bounds.y1;
+                const int dstWidth = dstDesc.bounds.x2 - dstDesc.bounds.x1;
+                const int dstHeight = dstDesc.bounds.y2 - dstDesc.bounds.y1;
+
+                OFXW::FrameView inView;
+                inView.data = srcDesc.data;
+                inView.width = srcWidth;
+                inView.height = srcHeight;
+                inView.rowBytes = srcDesc.rowBytes;
+                inView.format = toWorkerFormat(srcDesc.components, srcDesc.bitDepth);
+
+                OFXW::FrameView outView;
+                outView.data = dstDesc.data;
+                outView.width = dstWidth;
+                outView.height = dstHeight;
+                outView.rowBytes = dstDesc.rowBytes;
+                outView.format = toWorkerFormat(dstDesc.components, dstDesc.bitDepth);
+
+#if DPQC_ENABLE_SPATIAL
+                OfxParamSetHandle paramSet = nullptr;
+                const bool hasParamSet = (gEffectSuite->getParamSet(effect, &paramSet) == kOfxStatOK && paramSet != nullptr);
+
+                OFXW::SpatialParams workerParams;
+                workerParams.enable = getParamBoolAtTime(paramSet, kParamEnable, time, true);
+                workerParams.lumaThreshold = static_cast<float>(getParamDoubleAtTime(paramSet, kParamThreshold, time, 0.98));
+                workerParams.whitenessThreshold = 0.05f;
+                workerParams.robustZ = 10.0f;
+                workerParams.maxClusterArea = 4;
+
+                const int mode = getParamIntAtTime(paramSet, kParamMode, time, 0);
+                if (!hasParamSet || mode <= 0) {
+                    workerParams.outputMode = OFXW::SpatialOutputMode::PassThrough;
+                } else if (mode == 1) {
+                    workerParams.outputMode = OFXW::SpatialOutputMode::CandidatesOverlay;
+                } else {
+                    workerParams.outputMode = OFXW::SpatialOutputMode::MaskOnly;
+                }
+
+                OFXW::SpatialWorker worker;
+                const OFXW::SpatialResult workerResult = worker.process(inView, outView, workerParams);
+                if (!workerResult.ok) {
+                    copyImageRows(srcDesc, dstDesc);
+                }
+#else
+                copyImageRows(srcDesc, dstDesc);
+#endif
             }
         }
-        
-        // Apply repair if enabled and we have confirmed defects
-        if (repairParams.enable && !temporalResult.confirmed.empty()) {
-            instanceData->fixer->repairDefects(outputBuffer, temporalResult.confirmed);
-        }
-        
-    } catch (const std::exception& e) {
-        DEBUG_LOG_ERROR(std::string("Render error: ") + e.what());
-        DeadPixelQC_OFX::OfxUtil::reportError(effect, std::string("Render error: ") + e.what());
-        status = kOfxStatFailed;
+#if DPQC_ENABLE_FIX
+        // Reserved for stepwise enabling of FixWorker path.
+#endif
+#if DPQC_ENABLE_TEMPORAL
+        // Temporal path intentionally deferred (stateful, order-sensitive in host threading).
+#endif
+
+    } catch (...) {
+        status = kOfxStatOK;
     }
-    
-    // Release images
+
     gEffectSuite->clipReleaseImage(sourceImg);
     gEffectSuite->clipReleaseImage(outputImg);
-    
     return status;
 }
 
-// Plugin main entry point
-static OfxStatus pluginMain(const char* action, 
-                            const void* handle, 
-                            OfxPropertySetHandle inArgs, 
+static OfxStatus pluginMain(const char* action,
+                            const void* handle,
+                            OfxPropertySetHandle inArgs,
                             OfxPropertySetHandle outArgs) {
-    DEBUG_LOG_ACTION(action, "Plugin main entry");
-    
+    DPQC_LOG_ACTION(action ? action : "<null>", "Plugin main entry");
+
     OfxImageEffectHandle effect = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
-    
-    try {
-        if (strcmp(action, kOfxActionLoad) == 0) {
-            return onLoad();
-        } else if (strcmp(action, kOfxActionUnload) == 0) {
-            return onUnload();
-        } else if (strcmp(action, kOfxActionDescribe) == 0) {
-            return describe(effect);
-        } else if (strcmp(action, kOfxImageEffectActionDescribeInContext) == 0) {
-            return describeInContext(effect, inArgs);
-        } else if (strcmp(action, kOfxActionCreateInstance) == 0) {
-            return createInstance(effect);
-        } else if (strcmp(action, kOfxActionDestroyInstance) == 0) {
-            return destroyInstance(effect);
-        } else if (strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
-            return getClipPreferences(effect, inArgs, outArgs);
-        } else if (strcmp(action, kOfxActionInstanceChanged) == 0) {
-            return instanceChanged(effect, inArgs, outArgs);
-        } else if (strcmp(action, kOfxImageEffectActionBeginSequenceRender) == 0) {
-            return beginSequenceRender(effect, inArgs, outArgs);
-        } else if (strcmp(action, kOfxImageEffectActionEndSequenceRender) == 0) {
-            return endSequenceRender(effect, inArgs, outArgs);
-        } else if (strcmp(action, kOfxImageEffectActionRender) == 0) {
-            return render(effect, inArgs, outArgs);
-        }
-        
-        // Unknown action
-        DEBUG_LOG_WARNING(std::string("Unknown action: ") + action);
+
+    if (!action) {
         return kOfxStatReplyDefault;
-    } catch (const std::exception& e) {
-        DEBUG_LOG_ERROR(std::string("Plugin error: ") + e.what());
-        DeadPixelQC_OFX::OfxUtil::reportError(effect, std::string("Plugin error: ") + e.what());
-        return kOfxStatFailed;
     }
+
+    if (std::strcmp(action, kOfxActionLoad) == 0) {
+        return onLoad();
+    }
+    if (std::strcmp(action, kOfxActionUnload) == 0) {
+        return onUnload();
+    }
+    if (std::strcmp(action, kOfxActionDescribe) == 0) {
+        return describe(effect);
+    }
+    if (std::strcmp(action, kOfxImageEffectActionDescribeInContext) == 0) {
+        return describeInContext(effect, inArgs);
+    }
+    if (std::strcmp(action, kOfxActionCreateInstance) == 0) {
+        return createInstance(effect);
+    }
+    if (std::strcmp(action, kOfxActionDestroyInstance) == 0) {
+        return destroyInstance(effect);
+    }
+    if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
+        return getClipPreferences(effect, inArgs, outArgs);
+    }
+    if (std::strcmp(action, kOfxImageEffectActionRender) == 0) {
+        return render(effect, inArgs, outArgs);
+    }
+
+    return kOfxStatReplyDefault;
 }
 
-// Set host function (required by OFX)
 static void setHostFunction(OfxHost* host) {
-    DEBUG_LOG("setHostFunction called");
     gHost = host;
-    DEBUG_LOG("Host pointer stored");
 }
 
-// Optional OfxSetHost function (added in OFX 2020)
-OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
-    DEBUG_LOG("OfxSetHost called (optional function)");
+} // namespace
+
+extern "C" OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
     gHost = host;
     return kOfxStatOK;
 }
 
-// OFX plugin entry point
-OfxExport int OfxGetNumberOfPlugins(void) {
-    DEBUG_LOG("OfxGetNumberOfPlugins called, returning 1");
+extern "C" OfxExport int OfxGetNumberOfPlugins(void) {
     return 1;
 }
 
-OfxExport OfxPlugin* OfxGetPlugin(int nth) {
-    DEBUG_LOG(std::string("OfxGetPlugin called with nth=") + std::to_string(nth));
-    
+extern "C" OfxExport OfxPlugin* OfxGetPlugin(int nth) {
     if (nth != 0) {
-        DEBUG_LOG("Returning nullptr (nth != 0)");
         return nullptr;
     }
-    
+
     static OfxPlugin plugin;
     plugin.pluginApi = kOfxImageEffectPluginApi;
     plugin.apiVersion = kOfxImageEffectPluginApiVersion;
     plugin.pluginIdentifier = "DeadPixelQC";
     plugin.pluginVersionMajor = 1;
     plugin.pluginVersionMinor = 0;
-    plugin.setHost = setHostFunction;  // Set the required setHost function
+    plugin.setHost = setHostFunction;
     plugin.mainEntry = pluginMain;
-    
-    DEBUG_LOG("Returning plugin structure");
+
     return &plugin;
 }

@@ -1,9 +1,0 @@
-C:\DeadPixelQC_OFX\plugin\PluginMain.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginMain.obj
-C:\DeadPixelQC_OFX\plugin\PluginParams.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParams.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsConstants.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsConstants.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsBasic.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsBasic.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsDetection.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsDetection.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsTemporal.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsTemporal.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsRepair.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsRepair.obj
-C:\DeadPixelQC_OFX\plugin\PluginParamsGetters.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\PluginParamsGetters.obj
-C:\DeadPixelQC_OFX\plugin\OfxUtil.cpp;C:\DeadPixelQC_OFX\build\DeadPixelQC_OFX.dir\Release\OfxUtil.obj

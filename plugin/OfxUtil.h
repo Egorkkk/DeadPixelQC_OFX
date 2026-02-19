@@ -169,17 +169,23 @@ public:
     // Error reporting
     static void reportError(OfxImageEffectHandle instance,
                             const std::string& message) {
-        gMessageSuite->message(instance, kOfxMessageError, nullptr, message.c_str());
+        if (gMessageSuite && gMessageSuite->message) {
+            gMessageSuite->message(instance, kOfxMessageError, nullptr, message.c_str());
+        }
     }
     
     static void reportWarning(OfxImageEffectHandle instance,
                               const std::string& message) {
-        gMessageSuite->message(instance, kOfxMessageWarning, nullptr, message.c_str());
+        if (gMessageSuite && gMessageSuite->message) {
+            gMessageSuite->message(instance, kOfxMessageWarning, nullptr, message.c_str());
+        }
     }
     
     static void reportMessage(OfxImageEffectHandle instance,
                               const std::string& message) {
-        gMessageSuite->message(instance, kOfxMessageMessage, nullptr, message.c_str());
+        if (gMessageSuite && gMessageSuite->message) {
+            gMessageSuite->message(instance, kOfxMessageMessage, nullptr, message.c_str());
+        }
     }
     
     // Check if clip is connected

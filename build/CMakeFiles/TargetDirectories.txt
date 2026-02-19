@@ -1,7 +1,0 @@
-C:/DeadPixelQC_OFX/build/CMakeFiles/DeadPixelQC_OFX.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/DeadPixelQC_tests.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/offline_runner.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/docs.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/INSTALL.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/ALL_BUILD.dir
-C:/DeadPixelQC_OFX/build/CMakeFiles/ZERO_CHECK.dir
