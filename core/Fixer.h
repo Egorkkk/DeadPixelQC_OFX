@@ -63,6 +63,17 @@ public:
             }
         }
     }
+
+    // Repair an explicit list of defective coordinates.
+    void repairCoordinates(ImageBuffer& image, const std::vector<PixelCoord>& coords) {
+        if (!params_.enable || !image.isValid() || coords.empty()) {
+            return;
+        }
+
+        for (const auto& coord : coords) {
+            repairPixel(image, coord.x, coord.y);
+        }
+    }
     
     // Repair a single pixel
     void repairPixel(ImageBuffer& image, i32 x, i32 y) {
@@ -143,7 +154,7 @@ private:
         constexpr std::array<std::pair<i32, i32>, 4> directions = {{
             {1, 0},   // horizontal
             {0, 1},   // vertical
-            {1, 1},   // diagonal \
+            {1, 1},   // diagonal (\\)
             {1, -1}   // diagonal /
         }};
         

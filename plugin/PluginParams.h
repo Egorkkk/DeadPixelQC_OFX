@@ -33,6 +33,8 @@ extern const char* PARAM_MAP_STATUS;
 extern const char* PARAM_EXPORT_PATH;
 extern const char* PARAM_EXPORT_FORMAT;
 extern const char* PARAM_EXPORT_STATUS;
+extern const char* PARAM_MAP_PATH;
+extern const char* PARAM_CAMERA_TAG;
 
 // Workflow mode button parameters
 extern const char* PARAM_PREV_EVENT;
@@ -91,6 +93,8 @@ extern const char* DEFAULT_MAP_STATUS;
 extern const char* DEFAULT_EXPORT_PATH;
 extern const int DEFAULT_EXPORT_FORMAT;
 extern const char* DEFAULT_EXPORT_STATUS;
+extern const char* DEFAULT_MAP_PATH;
+extern const char* DEFAULT_CAMERA_TAG;
 
 // Define plugin parameters (composed from individual groups)
 void defineParameters(OfxParamSetHandle paramSet);

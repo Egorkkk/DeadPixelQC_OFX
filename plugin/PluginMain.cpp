@@ -10,17 +10,21 @@
 #include "Workers/SpatialWorker.h"
 #include "PluginParams.h"
 #include "OfxUtil.h"
+#include "../core/Fixer.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <memory>
 #include <new>
 #include <string>
 #include <sstream>
+#include <vector>
 
 #ifndef DPQC_MINIMAL_UI
 #define DPQC_MINIMAL_UI 1
@@ -28,8 +32,12 @@
 
 #if !DPQC_MINIMAL_UI
 #include "../log/EventLogger.h"
+#include "../log/MapAccumulator.h"
+#include "../model/DefectMap.h"
 #include "../export/ExportCSV.h"
+#include "../export/ExportDefectMap.h"
 #include "../export/ExportJSON.h"
+#include "../export/ImportDefectMap.h"
 #endif
 
 #ifndef DPQC_ENABLE_SPATIAL
@@ -73,6 +81,8 @@ struct PluginInstanceData {
     
 #if !DPQC_MINIMAL_UI
     std::unique_ptr<DeadPixelQC::EventLogger> eventLogger;
+    DeadPixelQC::MapAccumulator mapAccumulator;
+    DeadPixelQC::DefectMap defectMap;
     int selectedEventIndex = -1;
     std::atomic<bool> suppressInstanceChanged { false };
 #endif
@@ -142,6 +152,113 @@ static int bitDepthToBytes(const char* bitDepth) {
     }
     return 0;
 }
+
+static DeadPixelQC::PixelFormat toCoreFormat(const char* components, const char* bitDepth) {
+    if (!components || !bitDepth) {
+        return DeadPixelQC::PixelFormat::Unknown;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthByte) == 0) {
+        return DeadPixelQC::PixelFormat::RGB8;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthByte) == 0) {
+        return DeadPixelQC::PixelFormat::RGBA8;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthShort) == 0) {
+        return DeadPixelQC::PixelFormat::RGB16;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthShort) == 0) {
+        return DeadPixelQC::PixelFormat::RGBA16;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGB) == 0 && std::strcmp(bitDepth, kOfxBitDepthFloat) == 0) {
+        return DeadPixelQC::PixelFormat::RGB32F;
+    }
+    if (std::strcmp(components, kOfxImageComponentRGBA) == 0 && std::strcmp(bitDepth, kOfxBitDepthFloat) == 0) {
+        return DeadPixelQC::PixelFormat::RGBA32F;
+    }
+    return DeadPixelQC::PixelFormat::Unknown;
+}
+
+#if !DPQC_MINIMAL_UI
+static std::string formatMapSize(std::size_t size) {
+    return std::to_string(static_cast<unsigned long long>(size));
+}
+
+static std::string currentUtcIso8601() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t timeNow = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &timeNow);
+#else
+    gmtime_r(&timeNow, &utc);
+#endif
+
+    char buffer[32];
+    const std::size_t count = std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return (count > 0) ? std::string(buffer, count) : std::string();
+}
+
+static DeadPixelQC::DetectionHitList toDetectionHits(const DeadPixelQC::FrameDetection& detection) {
+    DeadPixelQC::DetectionHitList hits;
+    hits.reserve(detection.candidates.size());
+    for (const auto& candidate : detection.candidates) {
+        if (!candidate.pixels.empty()) {
+            const DeadPixelQC::PixelCoord& p = candidate.pixels.front();
+            hits.push_back({p.x, p.y, 0.5f});
+        }
+    }
+    return hits;
+}
+
+static int mapNormalizedToPixel(float value, int size) {
+    if (size <= 1) {
+        return 0;
+    }
+    const double clamped = std::max(0.0, std::min(1.0, static_cast<double>(value)));
+    return static_cast<int>(std::lround(clamped * static_cast<double>(size - 1)));
+}
+
+static OFXW::SpatialOutputMode resolveSpatialOutputMode(OfxParamSetHandle paramSet, double time) {
+    const bool hasViewMode = (paramSet != nullptr) && (gParamSuite != nullptr) &&
+        [&]() {
+            OfxParamHandle h = nullptr;
+            return gParamSuite->paramGetHandle(paramSet, DeadPixelQC_OFX::PARAM_VIEW_MODE, &h, nullptr) == kOfxStatOK && h != nullptr;
+        }();
+
+    if (hasViewMode) {
+        const int viewMode = [&]() {
+            int v = 0;
+            OfxParamHandle h = nullptr;
+            if (gParamSuite->paramGetHandle(paramSet, DeadPixelQC_OFX::PARAM_VIEW_MODE, &h, nullptr) == kOfxStatOK && h) {
+                gParamSuite->paramGetValueAtTime(h, time, &v);
+            }
+            return v;
+        }();
+        if (viewMode == 3) {
+            return OFXW::SpatialOutputMode::MaskOnly;
+        }
+        if (viewMode == 1 || viewMode == 2) {
+            return OFXW::SpatialOutputMode::CandidatesOverlay;
+        }
+        return OFXW::SpatialOutputMode::PassThrough;
+    }
+
+    int mode = 0;
+    if (paramSet && gParamSuite) {
+        OfxParamHandle h = nullptr;
+        if (gParamSuite->paramGetHandle(paramSet, kParamMode, &h, nullptr) == kOfxStatOK && h) {
+            gParamSuite->paramGetValueAtTime(h, time, &mode);
+        }
+    }
+    if (mode == 2) {
+        return OFXW::SpatialOutputMode::MaskOnly;
+    }
+    if (mode == 1) {
+        return OFXW::SpatialOutputMode::CandidatesOverlay;
+    }
+    return OFXW::SpatialOutputMode::PassThrough;
+}
+#endif
 
 static PluginInstanceData* getInstanceData(OfxImageEffectHandle effect) {
     OfxPropertySetHandle effectProps = nullptr;
@@ -542,7 +659,7 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
         return kOfxStatOK;
     }
 
-    if (paramName && instanceData->eventLogger) {
+    if (paramName) {
         OfxParamSetHandle paramSet = nullptr;
         if (gEffectSuite->getParamSet(effect, &paramSet) != kOfxStatOK || !paramSet) {
             return kOfxStatOK;
@@ -552,14 +669,23 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
         bool setIndex = false;
         bool setInfo = false;
         bool setExportStatus = false;
+        bool setMapSize = false;
+        bool setMapStatus = false;
         std::string nextCount;
         int nextIndex = -1;
         std::string nextInfo;
         std::string nextExportStatus;
+        std::string nextMapSize;
+        std::string nextMapStatus;
         bool runExport = false;
+        bool runSaveMap = false;
+        bool runLoadMap = false;
         std::string exportPath;
+        std::string mapPath;
         int exportFormat = DeadPixelQC_OFX::DEFAULT_EXPORT_FORMAT;
         DeadPixelQC::EventModel exportSnapshot;
+        DeadPixelQC::DefectMap mapSnapshot;
+        DeadPixelQC::DefectMap loadedMap;
 
         {
             std::lock_guard<std::mutex> lock(instanceData->mutex);
@@ -568,9 +694,9 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                 return kOfxStatOK;
             }
 
-        // Handle button events
+            // Handle button events
             if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_CLEAR_EVENTS) == 0) {
-                if (instanceData->eventLogger->model().size() > 0) {
+                if (instanceData->eventLogger && instanceData->eventLogger->model().size() > 0) {
                     instanceData->eventLogger->clear();
                     instanceData->selectedEventIndex = -1;
                     setCount = true;
@@ -582,7 +708,7 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                 }
             }
             else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_PREV_EVENT) == 0) {
-                size_t eventCount = instanceData->eventLogger->model().size();
+                const std::size_t eventCount = instanceData->eventLogger ? instanceData->eventLogger->model().size() : 0;
                 if (eventCount > 0) {
                     int newIndex = instanceData->selectedEventIndex - 1;
                     if (newIndex < 0) newIndex = static_cast<int>(eventCount) - 1;
@@ -604,7 +730,7 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                 }
             }
             else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_NEXT_EVENT) == 0) {
-                size_t eventCount = instanceData->eventLogger->model().size();
+                const std::size_t eventCount = instanceData->eventLogger ? instanceData->eventLogger->model().size() : 0;
                 if (eventCount > 0) {
                     int newIndex = instanceData->selectedEventIndex + 1;
                     if (newIndex >= static_cast<int>(eventCount)) newIndex = 0;
@@ -637,11 +763,66 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                     0.0,
                     DeadPixelQC_OFX::DEFAULT_EXPORT_FORMAT);
 
-                const DeadPixelQC::EventModel& sourceModel = instanceData->eventLogger->model();
-                for (std::size_t i = 0; i < sourceModel.size(); ++i) {
-                    exportSnapshot.addEvent(sourceModel.get(i));
+                if (instanceData->eventLogger) {
+                    const DeadPixelQC::EventModel& sourceModel = instanceData->eventLogger->model();
+                    for (std::size_t i = 0; i < sourceModel.size(); ++i) {
+                        exportSnapshot.addEvent(sourceModel.get(i));
+                    }
                 }
                 runExport = true;
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_RESET_MAP) == 0) {
+                instanceData->mapAccumulator.reset();
+                instanceData->defectMap.clear();
+                setMapSize = true;
+                setMapStatus = true;
+                nextMapSize = "0";
+                nextMapStatus = "Empty";
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_FINALIZE_MAP) == 0) {
+                DeadPixelQC::DefectMap finalized = instanceData->mapAccumulator.finalize(1);
+                finalized.metadata().version = 1;
+                finalized.metadata().createdUtc = currentUtcIso8601();
+                finalized.metadata().cameraTag = getParamStringAtTime(
+                    paramSet,
+                    DeadPixelQC_OFX::PARAM_CAMERA_TAG,
+                    0.0,
+                    DeadPixelQC_OFX::DEFAULT_CAMERA_TAG);
+                instanceData->defectMap = finalized;
+
+                setMapSize = true;
+                setMapStatus = true;
+                nextMapSize = formatMapSize(finalized.size());
+                std::ostringstream status;
+                status << "Finalized: " << finalized.size() << " points";
+                nextMapStatus = status.str();
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_SAVE_MAP) == 0) {
+                mapPath = getParamStringAtTime(
+                    paramSet,
+                    DeadPixelQC_OFX::PARAM_MAP_PATH,
+                    0.0,
+                    DeadPixelQC_OFX::DEFAULT_MAP_PATH);
+                if (!mapPath.empty()) {
+                    mapSnapshot = instanceData->defectMap;
+                    runSaveMap = true;
+                } else {
+                    setMapStatus = true;
+                    nextMapStatus = "Save failed: empty path";
+                }
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_LOAD_MAP) == 0) {
+                mapPath = getParamStringAtTime(
+                    paramSet,
+                    DeadPixelQC_OFX::PARAM_MAP_PATH,
+                    0.0,
+                    DeadPixelQC_OFX::DEFAULT_MAP_PATH);
+                if (!mapPath.empty()) {
+                    runLoadMap = true;
+                } else {
+                    setMapStatus = true;
+                    nextMapStatus = "Load failed: empty path";
+                }
             }
         }
 
@@ -661,7 +842,40 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
             setExportStatus = true;
         }
 
-        if (setCount || setIndex || setInfo || setExportStatus) {
+        if (runSaveMap) {
+            const bool ok = DeadPixelQC::ExportDefectMap::write(mapPath, mapSnapshot);
+            setMapStatus = true;
+            std::ostringstream status;
+            if (ok) {
+                status << "Saved: " << mapPath;
+            } else {
+                status << "Save failed: " << mapPath;
+            }
+            nextMapStatus = status.str();
+        }
+
+        if (runLoadMap) {
+            const bool ok = DeadPixelQC::ImportDefectMap::read(mapPath, loadedMap);
+            if (ok) {
+                {
+                    std::lock_guard<std::mutex> lock(instanceData->mutex);
+                    instanceData->defectMap = loadedMap;
+                }
+                setMapSize = true;
+                setMapStatus = true;
+                nextMapSize = formatMapSize(loadedMap.size());
+                std::ostringstream status;
+                status << "Loaded: " << loadedMap.size() << " points";
+                nextMapStatus = status.str();
+            } else {
+                setMapStatus = true;
+                std::ostringstream status;
+                status << "Load failed: " << mapPath;
+                nextMapStatus = status.str();
+            }
+        }
+
+        if (setCount || setIndex || setInfo || setExportStatus || setMapSize || setMapStatus) {
             instanceData->suppressInstanceChanged.store(true, std::memory_order_release);
             if (setCount) {
                 setParamString(paramSet, DeadPixelQC_OFX::PARAM_EVENTS_COUNT, nextCount);
@@ -674,6 +888,12 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
             }
             if (setExportStatus) {
                 setParamString(paramSet, DeadPixelQC_OFX::PARAM_EXPORT_STATUS, nextExportStatus);
+            }
+            if (setMapSize) {
+                setParamString(paramSet, DeadPixelQC_OFX::PARAM_MAP_SIZE, nextMapSize);
+            }
+            if (setMapStatus) {
+                setParamString(paramSet, DeadPixelQC_OFX::PARAM_MAP_STATUS, nextMapStatus);
             }
             instanceData->suppressInstanceChanged.store(false, std::memory_order_release);
         }
@@ -741,33 +961,46 @@ static OfxStatus render(OfxImageEffectHandle effect,
 #if DPQC_ENABLE_SPATIAL
                 OfxParamSetHandle paramSet = nullptr;
                 const bool hasParamSet = (gEffectSuite->getParamSet(effect, &paramSet) == kOfxStatOK && paramSet != nullptr);
+#if !DPQC_MINIMAL_UI
+                const int workflowMode = getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_WORKFLOW_MODE, time, 0);
+#else
+                const int workflowMode = 0;
+#endif
+                const bool runDetection = (workflowMode != 2); // 2 = Map_Apply
+                const bool effectEnabled = getParamBoolAtTime(paramSet, kParamEnable, time, true);
 
-                OFXW::SpatialParams workerParams;
-                workerParams.enable = getParamBoolAtTime(paramSet, kParamEnable, time, true);
-                workerParams.lumaThreshold = static_cast<float>(getParamDoubleAtTime(paramSet, kParamThreshold, time, 0.98));
-                workerParams.whitenessThreshold = 0.05f;
-                workerParams.robustZ = 10.0f;
-                workerParams.maxClusterArea = 4;
-
-                const int mode = getParamIntAtTime(paramSet, kParamMode, time, 0);
-                if (!hasParamSet || mode <= 0) {
-                    workerParams.outputMode = OFXW::SpatialOutputMode::PassThrough;
-                } else if (mode == 1) {
-                    workerParams.outputMode = OFXW::SpatialOutputMode::CandidatesOverlay;
+                OFXW::SpatialResult workerResult;
+                if (runDetection) {
+                    OFXW::SpatialParams workerParams;
+                    workerParams.enable = effectEnabled;
+                    workerParams.lumaThreshold = static_cast<float>(getParamDoubleAtTime(paramSet, kParamThreshold, time, 0.98));
+                    workerParams.whitenessThreshold = 0.05f;
+                    workerParams.robustZ = 10.0f;
+                    workerParams.maxClusterArea = 4;
+#if !DPQC_MINIMAL_UI
+                    workerParams.outputMode = resolveSpatialOutputMode(paramSet, time);
+#else
+                    const int mode = getParamIntAtTime(paramSet, kParamMode, time, 0);
+                    if (!hasParamSet || mode <= 0) {
+                        workerParams.outputMode = OFXW::SpatialOutputMode::PassThrough;
+                    } else if (mode == 1) {
+                        workerParams.outputMode = OFXW::SpatialOutputMode::CandidatesOverlay;
+                    } else {
+                        workerParams.outputMode = OFXW::SpatialOutputMode::MaskOnly;
+                    }
+#endif
+                    OFXW::SpatialWorker worker;
+                    workerResult = worker.process(inView, outView, workerParams);
+                    if (!workerResult.ok) {
+                        copyImageRows(srcDesc, dstDesc);
+                    }
                 } else {
-                    workerParams.outputMode = OFXW::SpatialOutputMode::MaskOnly;
+                    copyImageRows(srcDesc, dstDesc);
                 }
-
-                OFXW::SpatialWorker worker;
-                const OFXW::SpatialResult workerResult = worker.process(inView, outView, workerParams);
                 
 #if !DPQC_MINIMAL_UI
-                // Log events if in QC_Scan mode
-                if (instanceData->eventLogger) {
-                    int workflowMode = getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_WORKFLOW_MODE, time, 0);
-
-                    // 0 = QC_Scan, 1 = Map_Build, 2 = Map_Apply
-                    if (workflowMode == 0) {
+                if (runDetection && workerResult.processed) {
+                    if (workflowMode == 0 && instanceData->eventLogger) {
                         DeadPixelQC::EventLogger::Params loggerParams;
                         if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_MAX_GAP_FRAMES)) {
                             loggerParams.maxGapFrames =
@@ -786,28 +1019,58 @@ static OfxStatus render(OfxImageEffectHandle effect,
                             }
                         }
 
-                        // Convert candidates to compact DetectionHitList (one hit per cluster).
-                        DeadPixelQC::DetectionHitList hits;
-                        hits.reserve(workerResult.detection.candidates.size());
-                        for (const auto& candidate : workerResult.detection.candidates) {
-                            if (!candidate.pixels.empty()) {
-                                const DeadPixelQC::PixelCoord& p = candidate.pixels.front();
-                                hits.push_back({p.x, p.y, 0.5f});
-                            }
-                        }
+                        const DeadPixelQC::DetectionHitList hits = toDetectionHits(workerResult.detection);
 
                         std::lock_guard<std::mutex> lock(instanceData->mutex);
                         instanceData->eventLogger->setParams(loggerParams);
                         instanceData->eventLogger->ingestFrame(
                             static_cast<DeadPixelQC::i32>(workerResult.detection.frameIndex >= 0 ? workerResult.detection.frameIndex : 0),
                             hits);
+                    } else if (workflowMode == 1) {
+                        const DeadPixelQC::DetectionHitList hits = toDetectionHits(workerResult.detection);
+                        std::lock_guard<std::mutex> lock(instanceData->mutex);
+                        instanceData->mapAccumulator.ingestFrame(hits, srcWidth, srcHeight);
+                    }
+                }
+
+                if (workflowMode == 2 && effectEnabled) {
+                    std::vector<DeadPixelQC::PixelCoord> mapPixels;
+                    {
+                        std::lock_guard<std::mutex> lock(instanceData->mutex);
+                        mapPixels.reserve(instanceData->defectMap.points().size());
+                        for (const auto& p : instanceData->defectMap.points()) {
+                            DeadPixelQC::PixelCoord coord;
+                            coord.x = mapNormalizedToPixel(p.u, dstWidth);
+                            coord.y = mapNormalizedToPixel(p.v, dstHeight);
+                            mapPixels.push_back(coord);
+                        }
+                    }
+
+                    std::sort(mapPixels.begin(), mapPixels.end(), [](const DeadPixelQC::PixelCoord& a, const DeadPixelQC::PixelCoord& b) {
+                        return (a.y < b.y) || (a.y == b.y && a.x < b.x);
+                    });
+                    mapPixels.erase(std::unique(mapPixels.begin(), mapPixels.end(), [](const DeadPixelQC::PixelCoord& a, const DeadPixelQC::PixelCoord& b) {
+                        return a.x == b.x && a.y == b.y;
+                    }), mapPixels.end());
+
+                    if (!mapPixels.empty()) {
+                        DeadPixelQC::RepairParams repairParams;
+                        repairParams.enable = true;
+                        repairParams.method = DeadPixelQC::RepairMethod::NeighborMedian;
+                        if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_REPAIR_METHOD)) {
+                            const int method = getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_REPAIR_METHOD, time, 0);
+                            repairParams.method = (method == 1)
+                                ? DeadPixelQC::RepairMethod::DirectionalMedian
+                                : DeadPixelQC::RepairMethod::NeighborMedian;
+                        }
+
+                        const DeadPixelQC::PixelFormat dstFormat = toCoreFormat(dstDesc.components, dstDesc.bitDepth);
+                        DeadPixelQC::ImageBuffer dstBuffer(dstDesc.data, dstFormat, dstWidth, dstHeight, dstDesc.rowBytes);
+                        DeadPixelQC::Fixer fixer(repairParams);
+                        fixer.repairCoordinates(dstBuffer, mapPixels);
                     }
                 }
 #endif
-                
-                if (!workerResult.ok) {
-                    copyImageRows(srcDesc, dstDesc);
-                }
 #else
                 copyImageRows(srcDesc, dstDesc);
 #endif

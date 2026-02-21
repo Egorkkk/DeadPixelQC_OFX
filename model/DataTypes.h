@@ -24,13 +24,16 @@ struct DetectionEvent {
 struct DefectPointNorm {
     f32 u = 0.0f;
     f32 v = 0.0f;
+    f32 weight = 1.0f;
 };
 
 struct DefectMapMetadata {
-    i32 width = 0;
-    i32 height = 0;
+    i32 version = 1;
+    i32 sourceWidth = 0;
+    i32 sourceHeight = 0;
     i32 framesAnalyzed = 0;
-    std::string sourceClip;
+    std::string createdUtc;
+    std::string cameraTag;
 };
 
 } // namespace DeadPixelQC

@@ -27,6 +27,8 @@ const char* PARAM_MAP_STATUS = "MapStatus";
 const char* PARAM_EXPORT_PATH = "ExportPath";
 const char* PARAM_EXPORT_FORMAT = "ExportFormat";
 const char* PARAM_EXPORT_STATUS = "ExportStatus";
+const char* PARAM_MAP_PATH = "MapPath";
+const char* PARAM_CAMERA_TAG = "CameraTag";
 
 // Workflow mode button parameters
 const char* PARAM_PREV_EVENT = "PrevEvent";
@@ -85,5 +87,7 @@ const char* DEFAULT_MAP_STATUS = "Empty";
 const char* DEFAULT_EXPORT_PATH = "C:/Temp/deadpixelqc_events.csv";
 const int DEFAULT_EXPORT_FORMAT = 0; // CSV
 const char* DEFAULT_EXPORT_STATUS = "Idle";
+const char* DEFAULT_MAP_PATH = "C:/Temp/deadpixelqc_map.json";
+const char* DEFAULT_CAMERA_TAG = "";
 
 } // namespace DeadPixelQC_OFX

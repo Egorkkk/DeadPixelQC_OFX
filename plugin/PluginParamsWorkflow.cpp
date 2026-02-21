@@ -151,6 +151,22 @@ void defineWorkflowParameters(OfxParamSetHandle paramSet) {
     if (!setString(kOfxPropLabel, 0, "Export Status")) return;
     if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
     if (!setInt(kOfxParamPropEvaluateOnChange, 0, 0)) return;
+
+    // MapPath parameter
+    if (!defineParam(kOfxParamTypeString, PARAM_MAP_PATH)) return;
+    if (!setString(kOfxParamPropDefault, 0, DEFAULT_MAP_PATH)) return;
+    if (!setString(kOfxParamPropHint, 0, "Path to load/save defect map JSON")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "mapPath")) return;
+    if (!setString(kOfxPropLabel, 0, "Map Path")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+
+    // CameraTag parameter
+    if (!defineParam(kOfxParamTypeString, PARAM_CAMERA_TAG)) return;
+    if (!setString(kOfxParamPropDefault, 0, DEFAULT_CAMERA_TAG)) return;
+    if (!setString(kOfxParamPropHint, 0, "Camera tag saved into map metadata")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "cameraTag")) return;
+    if (!setString(kOfxPropLabel, 0, "Camera Tag")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
     
     // LoadMap button
     if (!defineParam(kOfxParamTypePushButton, PARAM_LOAD_MAP)) return;
