@@ -95,6 +95,16 @@ void defineWorkflowParameters(OfxParamSetHandle paramSet) {
     if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
     // Make read-only
     if (!setInt(kOfxParamPropEvaluateOnChange, 0, 0)) return;
+
+    // Debug Stats (read-only)
+    if (!defineParam(kOfxParamTypeString, PARAM_DEBUG_STATS)) return;
+    if (!setString(kOfxParamPropDefault, 0, DEFAULT_DEBUG_STATS)) return;
+    if (!setString(kOfxParamPropHint, 0, "Internal debug statistics")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "debugStats")) return;
+    if (!setString(kOfxPropLabel, 0, "Debug Stats")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+    // Make read-only
+    if (!setInt(kOfxParamPropEvaluateOnChange, 0, 0)) return;
     
 
     // PrevEvent button
