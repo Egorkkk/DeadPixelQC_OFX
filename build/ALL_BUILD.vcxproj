@@ -180,10 +180,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </ProjectReference>
-    <ProjectReference Include="C:\DeadPixelQC_OFX\build\DeadPixelQC_tests.vcxproj">
-      <Project>{D060F41B-C756-3AD3-B878-C2F7A6E18199}</Project>
-      <Name>DeadPixelQC_tests</Name>
-    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

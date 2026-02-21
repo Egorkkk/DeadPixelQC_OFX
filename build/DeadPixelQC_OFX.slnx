@@ -9,13 +9,9 @@
 	</Configurations>
 	<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="dcb98d14-c02b-3a0e-ac80-15466d88a8b6" DefaultStartup="true">
 		<BuildDependency Project="DeadPixelQC_OFX.vcxproj"/>
-		<BuildDependency Project="DeadPixelQC_tests.vcxproj"/>
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
 	</Project>
 	<Project Path="DeadPixelQC_OFX.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="966da1d8-b393-3eeb-bbb8-dd4ca7c2163e">
-		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
-	</Project>
-	<Project Path="DeadPixelQC_tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="d060f41b-c756-3ad3-b878-c2f7a6e18199">
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
 	</Project>
 	<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f7d33cfd-43a3-3ccf-a7ce-c7f645dd5760">
