@@ -8,16 +8,25 @@
 #include "ofxMessage.h"
 #include "ofxParam.h"
 #include "Workers/SpatialWorker.h"
+#include "PluginParams.h"
+#include "OfxUtil.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <new>
 #include <string>
+#include <sstream>
 
 #ifndef DPQC_MINIMAL_UI
 #define DPQC_MINIMAL_UI 1
+#endif
+
+#if !DPQC_MINIMAL_UI
+#include "../log/EventLogger.h"
 #endif
 
 #ifndef DPQC_ENABLE_SPATIAL
@@ -40,16 +49,15 @@
 // Global OFX host pointer
 static const OfxHost* gHost = nullptr;
 
-// Global OFX suite pointers
-static const OfxImageEffectSuiteV1* gEffectSuite = nullptr;
-static const OfxPropertySuiteV1* gPropertySuite = nullptr;
-static const OfxParameterSuiteV1* gParamSuite = nullptr;
-static const OfxMemorySuiteV1* gMemorySuite = nullptr;
-static const OfxMultiThreadSuiteV1* gMultiThreadSuite = nullptr;
-static const OfxMessageSuiteV1* gMessageSuite = nullptr;
-
 namespace {
 namespace OFXW = DeadPixelQC_OFX::Workers;
+
+const OfxImageEffectSuiteV1*& gEffectSuite = DeadPixelQC_OFX::gEffectSuite;
+const OfxPropertySuiteV1*& gPropertySuite = DeadPixelQC_OFX::gPropertySuite;
+const OfxParameterSuiteV1*& gParamSuite = DeadPixelQC_OFX::gParamSuite;
+const OfxMemorySuiteV1*& gMemorySuite = DeadPixelQC_OFX::gMemorySuite;
+const OfxMultiThreadSuiteV1*& gMultiThreadSuite = DeadPixelQC_OFX::gMultiThreadSuite;
+const OfxMessageSuiteV1*& gMessageSuite = DeadPixelQC_OFX::gMessageSuite;
 
 constexpr const char* kParamEnable = "Enable";
 constexpr const char* kParamThreshold = "Threshold";
@@ -59,6 +67,12 @@ struct PluginInstanceData {
     OfxImageClipHandle sourceClip = nullptr;
     OfxImageClipHandle outputClip = nullptr;
     std::mutex mutex;
+    
+#if !DPQC_MINIMAL_UI
+    std::unique_ptr<DeadPixelQC::EventLogger> eventLogger;
+    int selectedEventIndex = -1;
+    std::atomic<bool> suppressInstanceChanged { false };
+#endif
 };
 
 struct ImageDesc {
@@ -341,6 +355,28 @@ static int getParamIntAtTime(OfxParamSetHandle paramSet, const char* name, doubl
     return value;
 }
 
+static void setParamString(OfxParamSetHandle paramSet, const char* name, const std::string& value) {
+    if (!paramSet || !gParamSuite) {
+        return;
+    }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return;
+    }
+    gParamSuite->paramSetValueAtTime(handle, 0.0, value.c_str());
+}
+
+static void setParamInt(OfxParamSetHandle paramSet, const char* name, int value) {
+    if (!paramSet || !gParamSuite) {
+        return;
+    }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return;
+    }
+    gParamSuite->paramSetValueAtTime(handle, 0.0, value);
+}
+
 static void defineMinimalParameters(OfxParamSetHandle paramSet) {
     OfxPropertySetHandle paramProps = nullptr;
 
@@ -403,6 +439,9 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     OfxParamSetHandle paramSet = nullptr;
     if (gEffectSuite->getParamSet(effect, &paramSet) == kOfxStatOK && paramSet) {
         defineMinimalParameters(paramSet);
+#if !DPQC_MINIMAL_UI
+        DeadPixelQC_OFX::defineWorkflowParameters(paramSet);
+#endif
     }
 
     return kOfxStatOK;
@@ -426,6 +465,10 @@ static OfxStatus createInstance(OfxImageEffectHandle effect) {
         return kOfxStatErrBadHandle;
     }
 
+#if !DPQC_MINIMAL_UI
+    instanceData->eventLogger = std::make_unique<DeadPixelQC::EventLogger>();
+#endif
+
     setInstanceData(effect, instanceData);
     return kOfxStatOK;
 }
@@ -435,6 +478,9 @@ static OfxStatus destroyInstance(OfxImageEffectHandle effect) {
 
     PluginInstanceData* instanceData = getInstanceData(effect);
     if (instanceData) {
+#if !DPQC_MINIMAL_UI
+        instanceData->eventLogger.reset();
+#endif
         delete instanceData;
         setInstanceData(effect, nullptr);
     }
@@ -451,6 +497,120 @@ static OfxStatus getClipPreferences(OfxImageEffectHandle /*effect*/,
     }
     return kOfxStatOK;
 }
+
+#if !DPQC_MINIMAL_UI
+static OfxStatus instanceChanged(OfxImageEffectHandle effect,
+                                 OfxPropertySetHandle inArgs) {
+    PluginInstanceData* instanceData = getInstanceData(effect);
+    if (!instanceData) {
+        return kOfxStatOK;
+    }
+
+    // Get the changed parameter name
+    char* paramName = nullptr;
+    if (inArgs && gPropertySuite) {
+        gPropertySuite->propGetString(inArgs, kOfxPropName, 0, &paramName);
+    }
+
+    if (instanceData->suppressInstanceChanged.load(std::memory_order_acquire)) {
+        return kOfxStatOK;
+    }
+
+    if (paramName && instanceData->eventLogger) {
+        OfxParamSetHandle paramSet = nullptr;
+        if (gEffectSuite->getParamSet(effect, &paramSet) != kOfxStatOK || !paramSet) {
+            return kOfxStatOK;
+        }
+
+        bool setCount = false;
+        bool setIndex = false;
+        bool setInfo = false;
+        std::string nextCount;
+        int nextIndex = -1;
+        std::string nextInfo;
+
+        {
+            std::lock_guard<std::mutex> lock(instanceData->mutex);
+
+            if (instanceData->suppressInstanceChanged.load(std::memory_order_relaxed)) {
+                return kOfxStatOK;
+            }
+
+        // Handle button events
+            if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_CLEAR_EVENTS) == 0) {
+                if (instanceData->eventLogger->model().size() > 0) {
+                    instanceData->eventLogger->clear();
+                    instanceData->selectedEventIndex = -1;
+                    setCount = true;
+                    setIndex = true;
+                    setInfo = true;
+                    nextCount = "0";
+                    nextIndex = -1;
+                    nextInfo = "None";
+                }
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_PREV_EVENT) == 0) {
+                size_t eventCount = instanceData->eventLogger->model().size();
+                if (eventCount > 0) {
+                    int newIndex = instanceData->selectedEventIndex - 1;
+                    if (newIndex < 0) newIndex = static_cast<int>(eventCount) - 1;
+
+                    instanceData->selectedEventIndex = newIndex;
+                    const auto& event = instanceData->eventLogger->model().get(newIndex);
+
+                    std::ostringstream info;
+                    if (!event.hits.empty()) {
+                        const auto& hit = event.hits[0];
+                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y << " conf=" << hit.confidence;
+                    }
+
+                    setIndex = true;
+                    setInfo = true;
+                    nextIndex = newIndex;
+                    nextInfo = info.str();
+                }
+            }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_NEXT_EVENT) == 0) {
+                size_t eventCount = instanceData->eventLogger->model().size();
+                if (eventCount > 0) {
+                    int newIndex = instanceData->selectedEventIndex + 1;
+                    if (newIndex >= static_cast<int>(eventCount)) newIndex = 0;
+
+                    instanceData->selectedEventIndex = newIndex;
+                    const auto& event = instanceData->eventLogger->model().get(newIndex);
+
+                    std::ostringstream info;
+                    if (!event.hits.empty()) {
+                        const auto& hit = event.hits[0];
+                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y << " conf=" << hit.confidence;
+                    }
+
+                    setIndex = true;
+                    setInfo = true;
+                    nextIndex = newIndex;
+                    nextInfo = info.str();
+                }
+            }
+        }
+
+        if (setCount || setIndex || setInfo) {
+            instanceData->suppressInstanceChanged.store(true, std::memory_order_release);
+            if (setCount) {
+                setParamString(paramSet, DeadPixelQC_OFX::PARAM_EVENTS_COUNT, nextCount);
+            }
+            if (setIndex) {
+                setParamInt(paramSet, DeadPixelQC_OFX::PARAM_SELECTED_EVENT_INDEX, nextIndex);
+            }
+            if (setInfo) {
+                setParamString(paramSet, DeadPixelQC_OFX::PARAM_SELECTED_EVENT_INFO, nextInfo);
+            }
+            instanceData->suppressInstanceChanged.store(false, std::memory_order_release);
+        }
+    }
+
+    return kOfxStatOK;
+}
+#endif
 
 static OfxStatus render(OfxImageEffectHandle effect,
                         OfxPropertySetHandle inArgs,
@@ -529,6 +689,32 @@ static OfxStatus render(OfxImageEffectHandle effect,
 
                 OFXW::SpatialWorker worker;
                 const OFXW::SpatialResult workerResult = worker.process(inView, outView, workerParams);
+                
+#if !DPQC_MINIMAL_UI
+                // Log events if in QC_Scan mode
+                if (instanceData->eventLogger) {
+                    int workflowMode = getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_WORKFLOW_MODE, time, 0);
+
+                    // 0 = QC_Scan, 1 = Map_Build, 2 = Map_Apply
+                    if (workflowMode == 0) {
+                        // Convert candidates to compact DetectionHitList (one hit per cluster).
+                        DeadPixelQC::DetectionHitList hits;
+                        hits.reserve(workerResult.detection.candidates.size());
+                        for (const auto& candidate : workerResult.detection.candidates) {
+                            if (!candidate.pixels.empty()) {
+                                const DeadPixelQC::PixelCoord& p = candidate.pixels.front();
+                                hits.push_back({p.x, p.y, 0.5f});
+                            }
+                        }
+
+                        std::lock_guard<std::mutex> lock(instanceData->mutex);
+                        instanceData->eventLogger->ingestFrame(
+                            static_cast<DeadPixelQC::i32>(workerResult.detection.frameIndex >= 0 ? workerResult.detection.frameIndex : 0),
+                            hits);
+                    }
+                }
+#endif
+                
                 if (!workerResult.ok) {
                     copyImageRows(srcDesc, dstDesc);
                 }
@@ -589,6 +775,11 @@ static OfxStatus pluginMain(const char* action,
     if (std::strcmp(action, kOfxImageEffectActionRender) == 0) {
         return render(effect, inArgs, outArgs);
     }
+#if !DPQC_MINIMAL_UI
+    if (std::strcmp(action, kOfxActionInstanceChanged) == 0) {
+        return instanceChanged(effect, inArgs);
+    }
+#endif
 
     return kOfxStatReplyDefault;
 }

@@ -55,8 +55,17 @@ if(BUILD_PLUGIN)
             plugin/PluginParamsDetection.cpp
             plugin/PluginParamsTemporal.cpp
             plugin/PluginParamsRepair.cpp
+            plugin/PluginParamsWorkflow.cpp
             plugin/PluginParamsGetters.cpp
             plugin/OfxUtil.cpp
+            model/EventModel.cpp
+            log/EventLogger.cpp
+            model/DefectMap.cpp
+            log/MapAccumulator.cpp
+            export/ExportCSV.cpp
+            export/ExportJSON.cpp
+            export/ExportDefectMap.cpp
+            export/ImportDefectMap.cpp
         )
     endif()
 

@@ -3,10 +3,6 @@
 #include "DebugLog.h"
 #include <cstring>
 
-// Declare global suite pointers (defined in PluginMain.cpp)
-extern const OfxPropertySuiteV1* gPropertySuite;
-extern const OfxParameterSuiteV1* gParamSuite;
-
 namespace DeadPixelQC_OFX {
 
 // Define basic parameters

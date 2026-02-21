@@ -12,6 +12,7 @@ void defineParameters(OfxParamSetHandle paramSet) {
     defineDetectionParameters(paramSet);
     defineTemporalParameters(paramSet);
     defineRepairParameters(paramSet);
+    defineWorkflowParameters(paramSet);
     
     DEBUG_LOG("All parameters defined successfully");
 }

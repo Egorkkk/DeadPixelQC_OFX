@@ -17,6 +17,24 @@ const char* PARAM_MAX_GAP_FRAMES = "MaxGapFrames";
 const char* PARAM_REPAIR_ENABLE = "RepairEnable";
 const char* PARAM_REPAIR_METHOD = "RepairMethod";
 
+// Workflow mode and status parameters
+const char* PARAM_WORKFLOW_MODE = "WorkflowMode";
+const char* PARAM_EVENTS_COUNT = "EventsCount";
+const char* PARAM_SELECTED_EVENT_INDEX = "SelectedEventIndex";
+const char* PARAM_SELECTED_EVENT_INFO = "SelectedEventInfo";
+const char* PARAM_MAP_SIZE = "MapSize";
+const char* PARAM_MAP_STATUS = "MapStatus";
+
+// Workflow mode button parameters
+const char* PARAM_PREV_EVENT = "PrevEvent";
+const char* PARAM_NEXT_EVENT = "NextEvent";
+const char* PARAM_CLEAR_EVENTS = "ClearEvents";
+const char* PARAM_EXPORT_EVENTS = "ExportEvents";
+const char* PARAM_LOAD_MAP = "LoadMap";
+const char* PARAM_SAVE_MAP = "SaveMap";
+const char* PARAM_RESET_MAP = "ResetMap";
+const char* PARAM_FINALIZE_MAP = "FinalizeMap";
+
 // View mode enum strings
 const char* VIEW_MODE_OUTPUT = "Output";
 const char* VIEW_MODE_CANDIDATES_OVERLAY = "CandidatesOverlay";
@@ -35,6 +53,11 @@ const char* TEMPORAL_MODE_SEQUENTIAL_ONLY = "SequentialOnly";
 const char* REPAIR_METHOD_NEIGHBOR_MEDIAN = "NeighborMedian";
 const char* REPAIR_METHOD_DIRECTIONAL_MEDIAN = "DirectionalMedian";
 
+// Workflow mode enum strings
+const char* WORKFLOW_MODE_QC_SCAN = "QC_Scan";
+const char* WORKFLOW_MODE_MAP_BUILD = "Map_Build";
+const char* WORKFLOW_MODE_MAP_APPLY = "Map_Apply";
+
 // Default values
 const double DEFAULT_LUMA_THRESHOLD = 0.98;
 const double DEFAULT_WHITENESS_THRESHOLD = 0.05;
@@ -44,5 +67,13 @@ const int DEFAULT_MAX_CLUSTER_AREA = 4;
 const int DEFAULT_STUCK_WINDOW_FRAMES = 60;
 const double DEFAULT_STUCK_MIN_FRACTION = 0.95;
 const int DEFAULT_MAX_GAP_FRAMES = 2;
+
+// Default workflow values
+const int DEFAULT_WORKFLOW_MODE = 0; // QC_Scan
+const char* DEFAULT_EVENTS_COUNT = "0";
+const int DEFAULT_SELECTED_EVENT_INDEX = -1;
+const char* DEFAULT_SELECTED_EVENT_INFO = "None";
+const char* DEFAULT_MAP_SIZE = "0";
+const char* DEFAULT_MAP_STATUS = "Empty";
 
 } // namespace DeadPixelQC_OFX
