@@ -124,6 +124,33 @@ void defineWorkflowParameters(OfxParamSetHandle paramSet) {
     if (!setString(kOfxParamPropScriptName, 0, "exportEvents")) return;
     if (!setString(kOfxPropLabel, 0, "Export Events")) return;
     if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+
+    // ExportPath parameter
+    if (!defineParam(kOfxParamTypeString, PARAM_EXPORT_PATH)) return;
+    if (!setString(kOfxParamPropDefault, 0, DEFAULT_EXPORT_PATH)) return;
+    if (!setString(kOfxParamPropHint, 0, "Path to export events file")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "exportPath")) return;
+    if (!setString(kOfxPropLabel, 0, "Export Path")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+
+    // ExportFormat parameter
+    if (!defineParam(kOfxParamTypeChoice, PARAM_EXPORT_FORMAT)) return;
+    if (!setString(kOfxParamPropChoiceOption, 0, EXPORT_FORMAT_CSV)) return;
+    if (!setString(kOfxParamPropChoiceOption, 1, EXPORT_FORMAT_JSON)) return;
+    if (!setInt(kOfxParamPropDefault, 0, DEFAULT_EXPORT_FORMAT)) return;
+    if (!setString(kOfxParamPropHint, 0, "Export file format")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "exportFormat")) return;
+    if (!setString(kOfxPropLabel, 0, "Export Format")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+
+    // ExportStatus parameter (read-only)
+    if (!defineParam(kOfxParamTypeString, PARAM_EXPORT_STATUS)) return;
+    if (!setString(kOfxParamPropDefault, 0, DEFAULT_EXPORT_STATUS)) return;
+    if (!setString(kOfxParamPropHint, 0, "Status of the latest export")) return;
+    if (!setString(kOfxParamPropScriptName, 0, "exportStatus")) return;
+    if (!setString(kOfxPropLabel, 0, "Export Status")) return;
+    if (!setString(kOfxParamPropParent, 0, "Workflow")) return;
+    if (!setInt(kOfxParamPropEvaluateOnChange, 0, 0)) return;
     
     // LoadMap button
     if (!defineParam(kOfxParamTypePushButton, PARAM_LOAD_MAP)) return;

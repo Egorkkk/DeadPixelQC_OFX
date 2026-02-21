@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -27,6 +28,8 @@
 
 #if !DPQC_MINIMAL_UI
 #include "../log/EventLogger.h"
+#include "../export/ExportCSV.h"
+#include "../export/ExportJSON.h"
 #endif
 
 #ifndef DPQC_ENABLE_SPATIAL
@@ -355,6 +358,29 @@ static int getParamIntAtTime(OfxParamSetHandle paramSet, const char* name, doubl
     return value;
 }
 
+static std::string getParamStringAtTime(OfxParamSetHandle paramSet, const char* name, double time, const std::string& fallback) {
+    if (!paramSet || !gParamSuite) {
+        return fallback;
+    }
+    OfxParamHandle handle = nullptr;
+    if (gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) != kOfxStatOK || !handle) {
+        return fallback;
+    }
+    char* value = nullptr;
+    if (gParamSuite->paramGetValueAtTime(handle, time, &value) != kOfxStatOK || !value) {
+        return fallback;
+    }
+    return std::string(value);
+}
+
+static bool hasParam(OfxParamSetHandle paramSet, const char* name) {
+    if (!paramSet || !gParamSuite || !name) {
+        return false;
+    }
+    OfxParamHandle handle = nullptr;
+    return gParamSuite->paramGetHandle(paramSet, name, &handle, nullptr) == kOfxStatOK && handle != nullptr;
+}
+
 static void setParamString(OfxParamSetHandle paramSet, const char* name, const std::string& value) {
     if (!paramSet || !gParamSuite) {
         return;
@@ -525,9 +551,15 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
         bool setCount = false;
         bool setIndex = false;
         bool setInfo = false;
+        bool setExportStatus = false;
         std::string nextCount;
         int nextIndex = -1;
         std::string nextInfo;
+        std::string nextExportStatus;
+        bool runExport = false;
+        std::string exportPath;
+        int exportFormat = DeadPixelQC_OFX::DEFAULT_EXPORT_FORMAT;
+        DeadPixelQC::EventModel exportSnapshot;
 
         {
             std::lock_guard<std::mutex> lock(instanceData->mutex);
@@ -561,7 +593,8 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                     std::ostringstream info;
                     if (!event.hits.empty()) {
                         const auto& hit = event.hits[0];
-                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y << " conf=" << hit.confidence;
+                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y
+                             << " conf=" << hit.confidence << " pers=" << event.persistence;
                     }
 
                     setIndex = true;
@@ -582,7 +615,8 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                     std::ostringstream info;
                     if (!event.hits.empty()) {
                         const auto& hit = event.hits[0];
-                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y << " conf=" << hit.confidence;
+                        info << "frame=" << event.frameIndex << " x=" << hit.x << " y=" << hit.y
+                             << " conf=" << hit.confidence << " pers=" << event.persistence;
                     }
 
                     setIndex = true;
@@ -591,9 +625,43 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
                     nextInfo = info.str();
                 }
             }
+            else if (std::strcmp(paramName, DeadPixelQC_OFX::PARAM_EXPORT_EVENTS) == 0) {
+                exportPath = getParamStringAtTime(
+                    paramSet,
+                    DeadPixelQC_OFX::PARAM_EXPORT_PATH,
+                    0.0,
+                    DeadPixelQC_OFX::DEFAULT_EXPORT_PATH);
+                exportFormat = getParamIntAtTime(
+                    paramSet,
+                    DeadPixelQC_OFX::PARAM_EXPORT_FORMAT,
+                    0.0,
+                    DeadPixelQC_OFX::DEFAULT_EXPORT_FORMAT);
+
+                const DeadPixelQC::EventModel& sourceModel = instanceData->eventLogger->model();
+                for (std::size_t i = 0; i < sourceModel.size(); ++i) {
+                    exportSnapshot.addEvent(sourceModel.get(i));
+                }
+                runExport = true;
+            }
         }
 
-        if (setCount || setIndex || setInfo) {
+        if (runExport) {
+            const bool useJson = (exportFormat == 1);
+            const bool ok = useJson
+                ? DeadPixelQC::ExportJSON::writeEvents(exportPath, exportSnapshot)
+                : DeadPixelQC::ExportCSV::writeEvents(exportPath, exportSnapshot);
+
+            std::ostringstream status;
+            if (ok) {
+                status << "Export OK: " << exportPath;
+            } else {
+                status << "Export failed: " << exportPath;
+            }
+            nextExportStatus = status.str();
+            setExportStatus = true;
+        }
+
+        if (setCount || setIndex || setInfo || setExportStatus) {
             instanceData->suppressInstanceChanged.store(true, std::memory_order_release);
             if (setCount) {
                 setParamString(paramSet, DeadPixelQC_OFX::PARAM_EVENTS_COUNT, nextCount);
@@ -603,6 +671,9 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect,
             }
             if (setInfo) {
                 setParamString(paramSet, DeadPixelQC_OFX::PARAM_SELECTED_EVENT_INFO, nextInfo);
+            }
+            if (setExportStatus) {
+                setParamString(paramSet, DeadPixelQC_OFX::PARAM_EXPORT_STATUS, nextExportStatus);
             }
             instanceData->suppressInstanceChanged.store(false, std::memory_order_release);
         }
@@ -697,6 +768,24 @@ static OfxStatus render(OfxImageEffectHandle effect,
 
                     // 0 = QC_Scan, 1 = Map_Build, 2 = Map_Apply
                     if (workflowMode == 0) {
+                        DeadPixelQC::EventLogger::Params loggerParams;
+                        if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_MAX_GAP_FRAMES)) {
+                            loggerParams.maxGapFrames =
+                                getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_MAX_GAP_FRAMES, time, loggerParams.maxGapFrames);
+                        }
+                        if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_STUCK_WINDOW_FRAMES) &&
+                            hasParam(paramSet, DeadPixelQC_OFX::PARAM_STUCK_MIN_FRACTION)) {
+                            const int windowFrames =
+                                getParamIntAtTime(paramSet, DeadPixelQC_OFX::PARAM_STUCK_WINDOW_FRAMES, time, DeadPixelQC_OFX::DEFAULT_STUCK_WINDOW_FRAMES);
+                            const double minFraction =
+                                getParamDoubleAtTime(paramSet, DeadPixelQC_OFX::PARAM_STUCK_MIN_FRACTION, time, DeadPixelQC_OFX::DEFAULT_STUCK_MIN_FRACTION);
+                            const int derivedPersistence =
+                                static_cast<int>(std::lround(std::max(0.0, static_cast<double>(windowFrames) * minFraction)));
+                            if (derivedPersistence > 0) {
+                                loggerParams.minPersistenceFrames = derivedPersistence;
+                            }
+                        }
+
                         // Convert candidates to compact DetectionHitList (one hit per cluster).
                         DeadPixelQC::DetectionHitList hits;
                         hits.reserve(workerResult.detection.candidates.size());
@@ -708,6 +797,7 @@ static OfxStatus render(OfxImageEffectHandle effect,
                         }
 
                         std::lock_guard<std::mutex> lock(instanceData->mutex);
+                        instanceData->eventLogger->setParams(loggerParams);
                         instanceData->eventLogger->ingestFrame(
                             static_cast<DeadPixelQC::i32>(workerResult.detection.frameIndex >= 0 ? workerResult.detection.frameIndex : 0),
                             hits);

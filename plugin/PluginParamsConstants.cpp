@@ -24,6 +24,9 @@ const char* PARAM_SELECTED_EVENT_INDEX = "SelectedEventIndex";
 const char* PARAM_SELECTED_EVENT_INFO = "SelectedEventInfo";
 const char* PARAM_MAP_SIZE = "MapSize";
 const char* PARAM_MAP_STATUS = "MapStatus";
+const char* PARAM_EXPORT_PATH = "ExportPath";
+const char* PARAM_EXPORT_FORMAT = "ExportFormat";
+const char* PARAM_EXPORT_STATUS = "ExportStatus";
 
 // Workflow mode button parameters
 const char* PARAM_PREV_EVENT = "PrevEvent";
@@ -58,6 +61,10 @@ const char* WORKFLOW_MODE_QC_SCAN = "QC_Scan";
 const char* WORKFLOW_MODE_MAP_BUILD = "Map_Build";
 const char* WORKFLOW_MODE_MAP_APPLY = "Map_Apply";
 
+// Export format enum strings
+const char* EXPORT_FORMAT_CSV = "CSV";
+const char* EXPORT_FORMAT_JSON = "JSON";
+
 // Default values
 const double DEFAULT_LUMA_THRESHOLD = 0.98;
 const double DEFAULT_WHITENESS_THRESHOLD = 0.05;
@@ -75,5 +82,8 @@ const int DEFAULT_SELECTED_EVENT_INDEX = -1;
 const char* DEFAULT_SELECTED_EVENT_INFO = "None";
 const char* DEFAULT_MAP_SIZE = "0";
 const char* DEFAULT_MAP_STATUS = "Empty";
+const char* DEFAULT_EXPORT_PATH = "C:/Temp/deadpixelqc_events.csv";
+const int DEFAULT_EXPORT_FORMAT = 0; // CSV
+const char* DEFAULT_EXPORT_STATUS = "Idle";
 
 } // namespace DeadPixelQC_OFX

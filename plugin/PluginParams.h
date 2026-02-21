@@ -30,6 +30,9 @@ extern const char* PARAM_SELECTED_EVENT_INDEX;
 extern const char* PARAM_SELECTED_EVENT_INFO;
 extern const char* PARAM_MAP_SIZE;
 extern const char* PARAM_MAP_STATUS;
+extern const char* PARAM_EXPORT_PATH;
+extern const char* PARAM_EXPORT_FORMAT;
+extern const char* PARAM_EXPORT_STATUS;
 
 // Workflow mode button parameters
 extern const char* PARAM_PREV_EVENT;
@@ -64,6 +67,10 @@ extern const char* WORKFLOW_MODE_QC_SCAN;
 extern const char* WORKFLOW_MODE_MAP_BUILD;
 extern const char* WORKFLOW_MODE_MAP_APPLY;
 
+// Export format enum strings
+extern const char* EXPORT_FORMAT_CSV;
+extern const char* EXPORT_FORMAT_JSON;
+
 // Default values
 extern const double DEFAULT_LUMA_THRESHOLD;
 extern const double DEFAULT_WHITENESS_THRESHOLD;
@@ -81,6 +88,9 @@ extern const int DEFAULT_SELECTED_EVENT_INDEX;
 extern const char* DEFAULT_SELECTED_EVENT_INFO;
 extern const char* DEFAULT_MAP_SIZE;
 extern const char* DEFAULT_MAP_STATUS;
+extern const char* DEFAULT_EXPORT_PATH;
+extern const int DEFAULT_EXPORT_FORMAT;
+extern const char* DEFAULT_EXPORT_STATUS;
 
 // Define plugin parameters (composed from individual groups)
 void defineParameters(OfxParamSetHandle paramSet);

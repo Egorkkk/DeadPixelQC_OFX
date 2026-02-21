@@ -16,6 +16,8 @@ using DetectionHitList = std::vector<DetectionHit>;
 
 struct DetectionEvent {
     i32 frameIndex = -1;
+    bool confirmed = false;
+    i32 persistence = 0;
     DetectionHitList hits;
 };
 
