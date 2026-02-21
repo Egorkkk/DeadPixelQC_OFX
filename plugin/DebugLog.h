@@ -7,6 +7,9 @@
 #include <cstdlib>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -26,8 +29,7 @@ public:
         }
         if (file_.is_open()) {
             try {
-                file_ << message << std::endl;
-                file_.flush();
+                file_ << message << '\n';
             } catch (...) {
                 // Silent fail: logging must never crash plugin loading/rendering.
             }
@@ -70,11 +72,11 @@ private:
             if (!path.empty() && path.back() != '\\' && path.back() != '/') {
                 path += "\\";
             }
-            path += "deadpixelqc_debug.log";
+            path += "DeadPixelQC.log";
             return path;
         }
 #endif
-        return "C:\\temp\\deadpixelqc_debug.log";
+        return "DeadPixelQC.log";
     }
 
     void openIfNeededNoThrow() {
@@ -89,8 +91,12 @@ private:
     }
 };
 
+inline void LogLine(const std::string& line) {
+    DebugLog::instance().log(line);
+}
+
 // Макросы для удобства
-#define DEBUG_LOG(msg) DeadPixelQC_OFX::DebugLog::instance().log(msg)
+#define DEBUG_LOG(msg) DeadPixelQC_OFX::LogLine(msg)
 #define DEBUG_LOG_ACTION(action, handle) DeadPixelQC_OFX::DebugLog::instance().logAction(action, handle)
 #define DEBUG_LOG_ERROR(error) DeadPixelQC_OFX::DebugLog::instance().logError(error)
 #define DEBUG_LOG_WARNING(warning) DeadPixelQC_OFX::DebugLog::instance().logWarning(warning)

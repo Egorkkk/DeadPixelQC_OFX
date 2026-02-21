@@ -14,8 +14,14 @@ public:
     // Label mask and extract components
     static std::vector<Component> findComponents(const std::vector<bool>& mask, 
                                                  i32 width, i32 height,
-                                                 i32 maxArea = 4) {
+                                                 i32 maxArea = 4,
+                                                 i32 minArea = 1) {
         if (width <= 0 || height <= 0 || mask.size() != static_cast<size_t>(width * height)) {
+            return {};
+        }
+
+        minArea = std::max<i32>(1, minArea);
+        if (maxArea < minArea) {
             return {};
         }
         
@@ -104,7 +110,7 @@ public:
         std::vector<Component> filtered;
         for (auto& comp : components) {
             comp.computeProperties();
-            if (comp.area <= maxArea && comp.area > 0) {
+            if (comp.area >= minArea && comp.area <= maxArea) {
                 filtered.push_back(std::move(comp));
             }
         }
@@ -115,8 +121,14 @@ public:
     // Simple flood fill implementation (alternative)
     static std::vector<Component> findComponentsFloodFill(const std::vector<bool>& mask,
                                                          i32 width, i32 height,
-                                                         i32 maxArea = 4) {
+                                                         i32 maxArea = 4,
+                                                         i32 minArea = 1) {
         if (width <= 0 || height <= 0 || mask.size() != static_cast<size_t>(width * height)) {
+            return {};
+        }
+
+        minArea = std::max<i32>(1, minArea);
+        if (maxArea < minArea) {
             return {};
         }
         
@@ -163,7 +175,7 @@ public:
                 }
                 
                 comp.computeProperties();
-                if (comp.area <= maxArea && comp.area > 0) {
+                if (comp.area >= minArea && comp.area <= maxArea) {
                     components.push_back(std::move(comp));
                 }
             }

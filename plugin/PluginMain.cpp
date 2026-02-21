@@ -10,6 +10,7 @@
 #include "Workers/SpatialWorker.h"
 #include "PluginParams.h"
 #include "OfxUtil.h"
+#include "DebugLog.h"
 #include "../core/Fixer.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <iomanip>
 #include <mutex>
 #include <memory>
 #include <new>
@@ -73,16 +75,20 @@ const OfxMessageSuiteV1*& gMessageSuite = DeadPixelQC_OFX::gMessageSuite;
 constexpr const char* kParamEnable = "Enable";
 constexpr const char* kParamThreshold = "Threshold";
 constexpr const char* kParamMode = "Mode";
+constexpr int kRenderLogEveryNFrames = 15;
+constexpr int kRenderLogMaxCandidates = 5;
 
 struct PluginInstanceData {
     OfxImageClipHandle sourceClip = nullptr;
     OfxImageClipHandle outputClip = nullptr;
+    std::atomic<int> frameCounter { 0 };
     std::mutex mutex;
     
 #if !DPQC_MINIMAL_UI
     std::unique_ptr<DeadPixelQC::EventLogger> eventLogger;
     DeadPixelQC::MapAccumulator mapAccumulator;
     DeadPixelQC::DefectMap defectMap;
+    std::string lastDebugStats;
     int selectedEventIndex = -1;
     std::atomic<bool> suppressInstanceChanged { false };
 #endif
@@ -208,6 +214,26 @@ static DeadPixelQC::DetectionHitList toDetectionHits(const DeadPixelQC::FrameDet
         }
     }
     return hits;
+}
+
+static std::string formatSpatialDebugStats(const OFXW::SpatialResult::DebugStats& stats) {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed, std::ios::floatfield);
+    stream << "cand=" << stats.numCandidates
+           << " maxScore=" << std::setprecision(3) << stats.maxScore
+           << " luma=[" << std::setprecision(2) << stats.minLuma
+           << ".." << std::setprecision(2) << stats.maxLuma << "]"
+           << " p0=("
+           << std::setprecision(2) << stats.p0.r << ","
+           << std::setprecision(2) << stats.p0.g << ","
+           << std::setprecision(2) << stats.p0.b << ","
+           << std::setprecision(2) << stats.p0.a << ")"
+           << " p1=("
+           << std::setprecision(2) << stats.p1.r << ","
+           << std::setprecision(2) << stats.p1.g << ","
+           << std::setprecision(2) << stats.p1.b << ","
+           << std::setprecision(2) << stats.p1.a << ")";
+    return stream.str();
 }
 
 static int mapNormalizedToPixel(float value, int size) {
@@ -917,6 +943,8 @@ static OfxStatus render(OfxImageEffectHandle effect,
     if (inArgs) {
         gPropertySuite->propGetDouble(inArgs, kOfxPropTime, 0, &time);
     }
+    const int renderCounter = instanceData->frameCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool shouldWriteRenderLog = (renderCounter % kRenderLogEveryNFrames) == 0;
 
     OfxPropertySetHandle sourceImg = nullptr;
     OfxPropertySetHandle outputImg = nullptr;
@@ -1000,6 +1028,66 @@ static OfxStatus render(OfxImageEffectHandle effect,
                 
 #if !DPQC_MINIMAL_UI
                 if (runDetection && workerResult.processed) {
+                    if (shouldWriteRenderLog) {
+                        const DeadPixelQC::PixelFormat srcFormat = toCoreFormat(srcDesc.components, srcDesc.bitDepth);
+                        DeadPixelQC::ImageBuffer srcBuffer(srcDesc.data, srcFormat, srcWidth, srcHeight, srcDesc.rowBytes);
+                        const int frameIndexForLog = static_cast<int>(std::lround(time));
+                        const double thresholdForLog = hasParamSet
+                            ? getParamDoubleAtTime(paramSet, kParamThreshold, time, 0.98)
+                            : 0.98;
+
+                        std::ostringstream line;
+                        line.setf(std::ios::fixed, std::ios::floatfield);
+                        line << "frame=" << frameIndexForLog
+                             << " time=" << std::setprecision(3) << time
+                             << " wf=" << workflowMode
+                             << " thr=" << std::setprecision(3) << thresholdForLog
+                             << " cand=" << workerResult.debug.numCandidates
+                             << " maxScore=" << std::setprecision(3) << workerResult.debug.maxScore
+                             << " luma=[" << std::setprecision(2) << workerResult.debug.minLuma
+                             << ".." << std::setprecision(2) << workerResult.debug.maxLuma << "]";
+
+                        int loggedCandidates = 0;
+                        for (const auto& component : workerResult.detection.candidates) {
+                            if (loggedCandidates >= kRenderLogMaxCandidates) {
+                                break;
+                            }
+                            if (component.pixels.empty()) {
+                                continue;
+                            }
+                            const DeadPixelQC::PixelCoord& pixel = component.pixels.front();
+                            float score = 0.0f;
+                            if (srcBuffer.isValid()) {
+                                float r = 0.0f;
+                                float g = 0.0f;
+                                float b = 0.0f;
+                                srcBuffer.getRGBNormalized(pixel.x, pixel.y, r, g, b);
+                                score = DeadPixelQC::ColorUtils::computeLuma(r, g, b);
+                            }
+                            line << " c" << loggedCandidates
+                                 << "=(" << pixel.x << "," << pixel.y
+                                 << "," << std::setprecision(3) << score << ")";
+                            ++loggedCandidates;
+                        }
+
+                        DeadPixelQC_OFX::LogLine(line.str());
+                    }
+
+                    if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_DEBUG_STATS)) {
+                        const std::string debugStats = formatSpatialDebugStats(workerResult.debug);
+                        bool shouldUpdate = false;
+                        {
+                            std::lock_guard<std::mutex> lock(instanceData->mutex);
+                            if (debugStats != instanceData->lastDebugStats) {
+                                instanceData->lastDebugStats = debugStats;
+                                shouldUpdate = true;
+                            }
+                        }
+                        if (shouldUpdate) {
+                            setParamString(paramSet, DeadPixelQC_OFX::PARAM_DEBUG_STATS, debugStats);
+                        }
+                    }
+
                     if (workflowMode == 0 && instanceData->eventLogger) {
                         DeadPixelQC::EventLogger::Params loggerParams;
                         if (hasParam(paramSet, DeadPixelQC_OFX::PARAM_MAX_GAP_FRAMES)) {

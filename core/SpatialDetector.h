@@ -13,13 +13,16 @@ namespace DeadPixelQC {
 struct SpatialDetectorParams {
     ColorGateParams colorGate;
     RobustContrastParams contrastGate;
+    i32 minClusterArea = 1;          // Amin (default 1)
     i32 maxClusterArea = 4;          // Amax (default 4)
     bool useFloodFill = false;       // Use flood fill instead of union-find
     
     bool validate() const {
         return colorGate.validate() && 
                contrastGate.validate() && 
-               maxClusterArea > 0;
+               minClusterArea > 0 &&
+               maxClusterArea > 0 &&
+               minClusterArea <= maxClusterArea;
     }
 };
 
@@ -64,10 +67,10 @@ public:
         std::vector<Component> components;
         if (params_.useFloodFill) {
             components = ConnectedComponents::findComponentsFloodFill(
-                candidateMask, width, height, params_.maxClusterArea);
+                candidateMask, width, height, params_.maxClusterArea, params_.minClusterArea);
         } else {
             components = ConnectedComponents::findComponents(
-                candidateMask, width, height, params_.maxClusterArea);
+                candidateMask, width, height, params_.maxClusterArea, params_.minClusterArea);
         }
         
         result.candidates = std::move(components);

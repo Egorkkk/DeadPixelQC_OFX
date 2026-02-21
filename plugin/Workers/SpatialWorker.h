@@ -38,9 +38,28 @@ struct SpatialParams {
 };
 
 struct SpatialResult {
+    struct DebugStats {
+        struct SampleRGBA {
+            int x = 0;
+            int y = 0;
+            float r = 0.0f;
+            float g = 0.0f;
+            float b = 0.0f;
+            float a = 1.0f;
+        };
+
+        int numCandidates = 0;
+        float maxScore = 0.0f;
+        float minLuma = 0.0f;
+        float maxLuma = 0.0f;
+        SampleRGBA p0;
+        SampleRGBA p1;
+    };
+
     bool ok = true;
     bool processed = false;
     DeadPixelQC::FrameDetection detection;
+    DebugStats debug;
 };
 
 struct SpatialWorker {
